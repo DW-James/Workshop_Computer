@@ -36,7 +36,7 @@
         Pulse In 1:  Clock input (quarter notes → dotted-eighth delay)
         Pulse In 2:  Trigger input (behaviour depends on switch)
         CV In 1:     Ring mod FM (modulates Y knob carrier frequency)
-        CV In 2:     External chaos control (X knob attenuates)
+        CV In 2:     Ring mod (replaces Y knob when patched)
         CV Out 1:    Envelope follower on delay output
         CV Out 2:    Tempo-synced LFO (1 cycle per bar)
         Pulse Out 1: Bar clock (1 per 4 beats)
@@ -1003,25 +1003,8 @@ public:
         int32_t chaosKnobRaw = KnobVal(Knob::X);     // Chaos / density
         int32_t reverbKnob = KnobVal(Knob::Y);      // Ring mod
 
-        // CV In 2: external chaos control. When a cable is patched in,
-        // CV In 2 becomes the chaos source and X knob attenuates it.
-        // This lets you set up generative patches: patch a slow LFO into
-        // CV In 2 and the chaos will periodically swell, triggering bursts
-        // of glitchy sample playback, then subside back to quiet.
-        // CV range ±2047 is mapped to 0-4095 (unipolar, negative = zero).
-        // X knob at full = CV passes through at 100%. X at zero = no chaos.
-        int32_t chaosKnob;
-        if (!Disconnected(Input::CV2))
-        {
-            int32_t cv2 = CVIn2();  // ±2047
-            if (cv2 < 0) cv2 = 0;  // Unipolar: only positive CV creates chaos
-            int32_t cvScaled = (cv2 * 4095) / 2047;  // 0→4095
-            chaosKnob = (cvScaled * chaosKnobRaw) >> 12;  // X knob attenuates
-        }
-        else
-        {
-            chaosKnob = chaosKnobRaw;  // No cable: X knob works directly
-        }
+        // X knob controls chaos directly.
+        int32_t chaosKnob = chaosKnobRaw;
         int32_t switchPos  = SwitchVal();
 
         // ---- Clock detection (Pulse In 1 = quarter notes) ----
@@ -1391,29 +1374,35 @@ public:
         int32_t outL = clamp(delOutL, -2047, 2047);
         int32_t outR = clamp(delOutR, -2047, 2047);
 
-        // ---- Ring modulator (Y knob) ----
+        // ---- Ring modulator (Y knob / CV In 2) ----
         // Y knob controls both the carrier frequency AND the ring mod
         // amount in a single sweep. At zero: pure delay. As you turn
         // up, the carrier starts at ~1Hz (tremolo) and sweeps to
         // ~2kHz (metallic), while the ring mod signal is layered on
         // top of the dry delay — the delay tone is always present.
         //
-        // This makes the ring mod a character/texture effect rather
-        // than a replacement. At low Y you get gentle tremolo shimmer
-        // on top of the delay; at high Y it gets metallic and wild
-        // but the original delay signal stays audible underneath.
+        // CV In 2 = direct replacement for Y knob.
+        //   No cable: Y knob works directly.
+        //   Cable: CV In 2 replaces the Y knob value (unipolar,
+        //   0V = Y at zero, +5V = Y at max). Same behaviour as
+        //   turning the knob — controls both frequency and wet/dry.
+        //   Ideal for the Workshop 4-button keyboard to flip between
+        //   ring mod sweet spots.
         //
         // CV In 1 = frequency modulation of the carrier.
-        //   No cable: carrier runs at the Y knob frequency.
-        //   Cable: CV adds/subtracts from the Y frequency, sweeping the
-        //   ring mod character. Patch a slow LFO for evolving textures.
-        //
-        // The carrier is always generated internally at audio rate (48kHz)
-        // so it sounds correct at all frequencies. Using CV In 1 as an
-        // external carrier doesn't work well because the CV inputs are
-        // lowpass-filtered to ~3kHz — not enough bandwidth for ring mod.
+        //   Adds ±50% of the current frequency for evolving textures.
         {
-            int32_t yKnob = reverbKnob;
+            int32_t yKnob;
+            if (!Disconnected(Input::CV2))
+            {
+                int32_t cv2 = CVIn2();  // ±2047
+                if (cv2 < 0) cv2 = 0;
+                yKnob = (cv2 * 4095) / 2047;  // 0→4095
+            }
+            else
+            {
+                yKnob = reverbKnob;
+            }
 
             if (yKnob > 100)
             {
