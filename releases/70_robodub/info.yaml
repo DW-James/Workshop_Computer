@@ -1,0 +1,6 @@
+Description: Robodub - Stereo sound expander and dub delay. Feed in small mono signals, get evolving stereo soundscapes out. Glitchy sampler, tape wow, ring mod, feedback bloom.
+Name: Robodub
+Language: C++
+Creator: AI-generated (Claude) + James Robinson
+Version: 0.1
+Status: WIP
