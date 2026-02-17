@@ -2,5 +2,5 @@ Description: Robodub - Stereo sound expander and dub delay. Feed in small mono s
 Name: Robodub
 Language: C++
 Creator: AI-generated (Claude) + James Robinson
-Version: 0.1
-Status: WIP
+Version: 0.2
+Status: Beta
