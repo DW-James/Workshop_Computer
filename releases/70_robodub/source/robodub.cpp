@@ -1397,7 +1397,8 @@ public:
             {
                 int32_t cv2 = CVIn2();  // ±2047
                 if (cv2 < 0) cv2 = 0;
-                yKnob = (cv2 * 4095) / 2047;  // 0→4095
+                int32_t cvScaled = (cv2 * 4095) / 2047;  // 0→4095
+                yKnob = (cvScaled * reverbKnob) >> 12;    // Y knob attenuates
             }
             else
             {
