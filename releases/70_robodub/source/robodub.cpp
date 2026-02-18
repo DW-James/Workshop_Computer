@@ -1616,33 +1616,36 @@ public:
         feedbackL = filter_hp(&dcBlockL, 1022, feedbackL);
         feedbackR = filter_hp(&dcBlockR, 1022, feedbackR);
 
-        // Narrow dip at ~1200Hz to tame resonant peak from cumulative
-        // LP+HP phase shift in the feedback loop. Bandpass = LP@1400Hz
-        // minus LP@1050Hz, subtract ~22% of that band from the signal.
-        // Band ~350Hz wide, centred ~1225Hz, cut ~-2.2dB at centre.
-        // Coefficients: 11277 ≈ 1400Hz, 8498 ≈ 1050Hz at 48kHz.
+        // Two narrow dips to tame resonant peaks from cumulative
+        // LP+HP phase shift in the feedback loop.
+        // Dip 1: fundamental at ~1190Hz (bandpass 1080-1300Hz, 15%)
+        // Dip 2: 2nd harmonic at ~2360Hz (bandpass 2100-2700Hz, 15%)
+        // Coefficients: 10466≈1300Hz, 8741≈1080Hz, 20525≈2700Hz, 16277≈2100Hz
         {
-            int32_t hiL = filter_lp(&dipHi_L, 11277, feedbackL);
-            int32_t loL = filter_lp(&dipLo_L, 8498, feedbackL);
-            feedbackL -= ((hiL - loL) * 225) >> 10;  // 225/1024 ≈ 22%
+            int32_t hiL = filter_lp(&dipHi_L, 10466, feedbackL);
+            int32_t loL = filter_lp(&dipLo_L, 8741, feedbackL);
+            feedbackL -= ((hiL - loL) * 154) >> 10;  // 154/1024 ≈ 15%
 
-            int32_t hiR = filter_lp(&dipHi_R, 11277, feedbackR);
-            int32_t loR = filter_lp(&dipLo_R, 8498, feedbackR);
-            feedbackR -= ((hiR - loR) * 225) >> 10;
+            int32_t hiR = filter_lp(&dipHi_R, 10466, feedbackR);
+            int32_t loR = filter_lp(&dipLo_R, 8741, feedbackR);
+            feedbackR -= ((hiR - loR) * 154) >> 10;
         }
-
-        // Second harmonic dip at ~2360Hz — same phase-shift resonance
-        // one octave up. Bandpass = LP@2700Hz minus LP@2100Hz, ~22%.
-        // Coefficients: 20525 ≈ 2700Hz, 16277 ≈ 2100Hz at 48kHz.
         {
             int32_t hiL = filter_lp(&dip2Hi_L, 20525, feedbackL);
             int32_t loL = filter_lp(&dip2Lo_L, 16277, feedbackL);
-            feedbackL -= ((hiL - loL) * 225) >> 10;
+            feedbackL -= ((hiL - loL) * 154) >> 10;
 
             int32_t hiR = filter_lp(&dip2Hi_R, 20525, feedbackR);
             int32_t loR = filter_lp(&dip2Lo_R, 16277, feedbackR);
-            feedbackR -= ((hiR - loR) * 225) >> 10;
+            feedbackR -= ((hiR - loR) * 154) >> 10;
         }
+
+        // Compensate for energy lost in the two dips above.
+        // Each dip removes ~15% of a narrow band (~2-3% of total energy).
+        // A ~3% broadband boost restores unity at the 50% knob point.
+        // 1055/1024 ≈ 1.030 (+0.26dB).
+        feedbackL = (feedbackL * 1055) >> 10;
+        feedbackR = (feedbackR * 1055) >> 10;
 
         // Hard clamp to DAC range before writing back to delay
         feedbackL = clamp(feedbackL, -2047, 2047);
