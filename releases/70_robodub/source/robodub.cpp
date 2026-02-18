@@ -1270,6 +1270,7 @@ class Robodub : public ComputerCard
 
     // LED + timing
     uint32_t ttLedFlashTimer;        // Counter for confirmation LED flash
+    uint32_t ttTappedInterval;       // Raw tapped quarter-note interval (before doubling)
     uint32_t ttInactivityTimer;      // Counts up since last tap / state entry
     uint8_t  ttMetronomeVolume;      // 1-10 (default 5)
     bool     tapTempoLocked;         // Prevents clock timeout from clearing sync
@@ -1396,6 +1397,9 @@ class Robodub : public ComputerCard
 
         // First halve if the raw interval's dotted-eighth is already too long
         while (((avgInterval * 3) >> 3) > MAX_DELAY_SAMPLES) avgInterval >>= 1;
+
+        // Save the raw tapped interval for confirmation playback
+        ttTappedInterval = avgInterval;
 
         // Then double the quarter note as long as the dotted-eighth still fits
         uint32_t quarter = avgInterval;
@@ -1528,9 +1532,9 @@ class Robodub : public ComputerCard
                     tt_calculate_tempo();
 
                     // Build confirmation: wait one beat, then 2 clicks at tapped tempo.
-                    // The leading silence ensures a proper gap after the 6th tap's click.
+                    // Uses the raw tapped interval (not the doubled clockPeriod).
                     uint32_t clickDur = TT_DUR_30MS;
-                    uint32_t beatRest = (clockPeriod > clickDur) ? (clockPeriod - clickDur) : clickDur;
+                    uint32_t beatRest = (ttTappedInterval > clickDur) ? (ttTappedInterval - clickDur) : clickDur;
                     ttDynConfirm[0] = { 0, beatRest };              // wait after 6th tap
                     ttDynConfirm[1] = { TT_PHASE_HIGH, clickDur };  // confirm click 1
                     ttDynConfirm[2] = { 0, beatRest };              // beat gap
@@ -1667,6 +1671,7 @@ public:
         for (int i = 0; i < 6; i++) ttTapTimestamps[i] = 0;
         ttLastSwitchDown = false;
         ttLedFlashTimer = 0;
+        ttTappedInterval = 0;
         ttInactivityTimer = 0;
         ttMetronomeVolume = TT_DEFAULT_VOLUME;
         tapTempoLocked = false;
