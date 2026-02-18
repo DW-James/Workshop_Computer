@@ -1097,7 +1097,6 @@ class Robodub : public ComputerCard
     // --- Feedback filters (per channel) ---
     OnePole feedbackLPF_L, feedbackLPF_R;   // HF damping (tape darkening)
     OnePole dcBlockL, dcBlockR;              // DC blocker (prevents runaway)
-    OnePole notchLP_L, notchLP_R;           // ~1200Hz resonance dip (feedback tamer)
 
     // --- Tape wow (simple sine modulation of delay read position) ---
     // Each channel gets its own slow sine LFO at a different rate,
@@ -1180,8 +1179,6 @@ public:
         filter_init(&feedbackLPF_R);
         filter_init(&dcBlockL);
         filter_init(&dcBlockR);
-        filter_init(&notchLP_L);
-        filter_init(&notchLP_R);
         ringmod_phase = 0;
 
         // Tape wow: two slow sine LFOs at different rates modulate
@@ -1606,20 +1603,6 @@ public:
         // while leaving kick drums and bass notes intact.
         feedbackL = filter_hp(&dcBlockL, 1022, feedbackL);
         feedbackR = filter_hp(&dcBlockR, 1022, feedbackR);
-
-        // Mid-scoop at ~1200Hz tames a resonant peak caused by
-        // cumulative phase shift from the LP+HP filters over many
-        // feedback passes. The geometric mean of 120Hz and 12kHz
-        // is ~1200Hz — right where the ringing sits.
-        // Method: LP extract at 1200Hz, subtract ~25% of it.
-        // This gives a broad -2.5dB dip centred on the resonance.
-        // Coefficient 9886 ≈ 1200Hz at 48kHz.
-        {
-            int32_t midL = filter_lp(&notchLP_L, 9886, feedbackL);
-            int32_t midR = filter_lp(&notchLP_R, 9886, feedbackR);
-            feedbackL -= midL >> 2;
-            feedbackR -= midR >> 2;
-        }
 
         // Hard clamp to DAC range before writing back to delay
         feedbackL = clamp(feedbackL, -2047, 2047);
