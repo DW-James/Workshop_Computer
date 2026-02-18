@@ -1375,8 +1375,9 @@ class Robodub : public ComputerCard
     }
 
     // Calculate delay time from 6 taps.
-    // Averages 5 intervals, normalises BPM to 60-200 range,
-    // converts to dotted-eighth delay time in samples.
+    // Averages 5 intervals. The tapped interval IS the desired delay time —
+    // no dotted-eighth conversion (that's only for external quarter-note clocks).
+    // Zone normalisation clamps to the buffer's usable range.
     inline void tt_calculate_tempo()
     {
         if (ttTapCount < 2) return;
@@ -1388,19 +1389,16 @@ class Robodub : public ComputerCard
             sum += ttTapTimestamps[i + 1] - ttTapTimestamps[i];
         uint32_t avgInterval = sum / count;
 
-        // Convert to BPM: BPM = 60 * 48000 / avgInterval = 2,880,000 / avgInterval
-        // We do the zone normalisation in the interval domain to avoid floats.
-        // BPM < 60 means interval > 48000 → double BPM (halve interval)
-        // BPM > 200 means interval < 14400 → halve BPM (double interval)
-        while (avgInterval > 48000) avgInterval >>= 1;   // BPM was < 60
-        while (avgInterval < 14400) avgInterval <<= 1;    // BPM was > 200
+        // Zone normalisation: keep the interval within the delay buffer range.
+        // Too long (>680ms / 32640 samples): halve until it fits.
+        // Too short (<100ms / 4800 samples): double until it fits.
+        while (avgInterval > MAX_DELAY_SAMPLES) avgInterval >>= 1;
+        while (avgInterval < MIN_DELAY_SAMPLES) avgInterval <<= 1;
 
-        // Dotted eighth = 3/8 of a quarter note
-        // quarterPeriod = avgInterval (already in samples)
-        // delayTime = (avgInterval * 3) >> 3
-        uint32_t newDelay = (avgInterval * 3) >> 3;
+        // The tapped interval is the delay time directly.
+        uint32_t newDelay = avgInterval;
 
-        // Clamp to valid range
+        // Clamp to valid range (safety — normalisation above should handle it)
         if (newDelay < MIN_DELAY_SAMPLES) newDelay = MIN_DELAY_SAMPLES;
         if (newDelay > MAX_DELAY_SAMPLES) newDelay = MAX_DELAY_SAMPLES;
 
