@@ -1389,21 +1389,27 @@ class Robodub : public ComputerCard
             sum += ttTapTimestamps[i + 1] - ttTapTimestamps[i];
         uint32_t avgInterval = sum / count;
 
-        // Find the longest multiple of the tapped interval that fits
-        // in the delay buffer. This gives the slowest feel at the chosen BPM.
-        // e.g. at 200 BPM (~300ms), 2× = 600ms fits in 680ms buffer → use 600ms.
-        // At 106 BPM (~566ms), 1× fits but 2× = 1132ms doesn't → use 566ms.
-        // If the raw interval is too long, halve until it fits.
-        while (avgInterval > MAX_DELAY_SAMPLES) avgInterval >>= 1;
-        uint32_t newDelay = avgInterval;
-        while ((newDelay << 1) <= MAX_DELAY_SAMPLES) newDelay <<= 1;
+        // Tapped interval = quarter note. Delay = dotted eighth = 3/8 of quarter.
+        // Find the longest quarter-note multiple whose dotted-eighth fits in buffer.
+        // e.g. 106 BPM: quarter=566ms, dotted-8th=212ms, 2×quarter→424ms fits → use 424ms.
+        //      80 BPM: quarter=750ms, dotted-8th=281ms, 2×quarter→562ms fits → use 562ms.
 
-        // Clamp to valid range (safety — normalisation above should handle it)
+        // First halve if the raw interval's dotted-eighth is already too long
+        while (((avgInterval * 3) >> 3) > MAX_DELAY_SAMPLES) avgInterval >>= 1;
+
+        // Then double the quarter note as long as the dotted-eighth still fits
+        uint32_t quarter = avgInterval;
+        while ((((quarter << 1) * 3) >> 3) <= MAX_DELAY_SAMPLES) quarter <<= 1;
+
+        // Dotted eighth = 3/8 of the (possibly doubled) quarter note
+        uint32_t newDelay = (quarter * 3) >> 3;
+
+        // Clamp to valid range (safety)
         if (newDelay < MIN_DELAY_SAMPLES) newDelay = MIN_DELAY_SAMPLES;
         if (newDelay > MAX_DELAY_SAMPLES) newDelay = MAX_DELAY_SAMPLES;
 
         // Store — the existing smooth transition handles the glide
-        clockPeriod = avgInterval;
+        clockPeriod = quarter;
         delayTimeSamples = newDelay;
         clockSynced = true;
         tapTempoLocked = true;
