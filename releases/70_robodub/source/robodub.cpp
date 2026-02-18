@@ -506,7 +506,7 @@ static BandCompParams comp_params[NUM_BANDS] = {
 // inv_duck_range: precomputed (1<<16)/200 = 327, avoids division on M0+
 #define SC_INV_DUCK_RANGE 327
 #define SC_ENV_ATTACK_COEFF  13107  // ~1ms attack (at core 1's ~5kHz loop rate)
-#define SC_ENV_RELEASE_COEFF 524    // ~25ms release
+#define SC_ENV_RELEASE_COEFF 131    // ~100ms release (slow pump)
 
 // Gain smoother coefficient (48kHz, ~1ms time constant)
 #define GAIN_SMOOTH_COEFF   400
