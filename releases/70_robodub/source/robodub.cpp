@@ -104,7 +104,10 @@ static void delay_init(DelayBuffer *db, uint32_t maxDelay)
 {
     uint32_t size = 1;
     while (size < maxDelay + 1) size <<= 1;
-    db->data = new int16_t[size]();
+    db->data = new int16_t[size];
+    // Explicit zero — value-init via () isn't reliable after warm reset
+    // (e.g. UF2 re-flash with USB connected, watchdog reset)
+    for (uint32_t i = 0; i < size; i++) db->data[i] = 0;
     db->mask = size - 1;
     db->writePos = 0;
 }
