@@ -501,10 +501,10 @@ static BandCompParams comp_params[NUM_BANDS] = {
 #define ENV_RELEASE_COEFF   262    // ~50ms release
 
 // Sidechain ducking parameters (core 1)
-#define SC_DUCK_DEPTH     614   // Max ducking in Q10 (~-4dB)
-#define SC_DUCK_THRESHOLD 100   // Sidechain level to start ducking
-// inv_duck_range: precomputed (1<<16)/600 = 109, avoids division on M0+
-#define SC_INV_DUCK_RANGE 109
+#define SC_DUCK_DEPTH     820   // Max ducking in Q10 (~-12dB)
+#define SC_DUCK_THRESHOLD 40    // Sidechain level to start ducking (very sensitive)
+// inv_duck_range: precomputed (1<<16)/200 = 327, avoids division on M0+
+#define SC_INV_DUCK_RANGE 327
 #define SC_ENV_ATTACK_COEFF  13107  // ~1ms attack (at core 1's ~5kHz loop rate)
 #define SC_ENV_RELEASE_COEFF 524    // ~25ms release
 
