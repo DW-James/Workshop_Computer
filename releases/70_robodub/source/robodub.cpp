@@ -1097,6 +1097,8 @@ class Robodub : public ComputerCard
     // --- Feedback filters (per channel) ---
     OnePole feedbackLPF_L, feedbackLPF_R;   // HF damping (tape darkening)
     OnePole dcBlockL, dcBlockR;              // DC blocker (prevents runaway)
+    OnePole dipHi_L, dipHi_R;               // ~1500Hz LP (upper edge of dip band)
+    OnePole dipLo_L, dipLo_R;               // ~900Hz LP (lower edge of dip band)
 
     // --- Tape wow (simple sine modulation of delay read position) ---
     // Each channel gets its own slow sine LFO at a different rate,
@@ -1179,6 +1181,10 @@ public:
         filter_init(&feedbackLPF_R);
         filter_init(&dcBlockL);
         filter_init(&dcBlockR);
+        filter_init(&dipHi_L);
+        filter_init(&dipHi_R);
+        filter_init(&dipLo_L);
+        filter_init(&dipLo_R);
         ringmod_phase = 0;
 
         // Tape wow: two slow sine LFOs at different rates modulate
@@ -1603,6 +1609,21 @@ public:
         // while leaving kick drums and bass notes intact.
         feedbackL = filter_hp(&dcBlockL, 1022, feedbackL);
         feedbackR = filter_hp(&dcBlockR, 1022, feedbackR);
+
+        // Narrow dip at ~1190Hz to tame resonant peak from cumulative
+        // LP+HP phase shift in the feedback loop. Bandpass = LP@1300Hz
+        // minus LP@1080Hz, subtract ~15% of that band from the signal.
+        // Narrow band (~220Hz wide), gentle cut (~-1.4dB at centre).
+        // Coefficients: 10466 ≈ 1300Hz, 8741 ≈ 1080Hz at 48kHz.
+        {
+            int32_t hiL = filter_lp(&dipHi_L, 10466, feedbackL);
+            int32_t loL = filter_lp(&dipLo_L, 8741, feedbackL);
+            feedbackL -= ((hiL - loL) * 154) >> 10;  // 154/1024 ≈ 15%
+
+            int32_t hiR = filter_lp(&dipHi_R, 10466, feedbackR);
+            int32_t loR = filter_lp(&dipLo_R, 8741, feedbackR);
+            feedbackR -= ((hiR - loR) * 154) >> 10;
+        }
 
         // Hard clamp to DAC range before writing back to delay
         feedbackL = clamp(feedbackL, -2047, 2047);
