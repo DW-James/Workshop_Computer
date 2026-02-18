@@ -1261,7 +1261,7 @@ class Robodub : public ComputerCard
     const ToneStep *ttCurrentSeq;    // Pointer to announce/confirm/dynamic sequence
 
     // Dynamic confirmation sequence (built at confirm time from tapped tempo)
-    ToneStep ttDynConfirm[4];        // click-silence-click-silence at tapped BPM
+    ToneStep ttDynConfirm[5];        // wait-click-silence-click-silence at tapped BPM
 
     // Tap collection
     uint8_t  ttTapCount;             // Number of taps collected (0-6)
@@ -1523,19 +1523,20 @@ class Robodub : public ComputerCard
                     // All taps collected — calculate and confirm
                     tt_calculate_tempo();
 
-                    // Build confirmation: 2 clicks at the tapped tempo.
-                    // Each beat = click (30ms) + silence (rest of beat).
+                    // Build confirmation: wait one beat, then 2 clicks at tapped tempo.
+                    // The leading silence ensures a proper gap after the 6th tap's click.
                     uint32_t clickDur = TT_DUR_30MS;
                     uint32_t beatRest = (clockPeriod > clickDur) ? (clockPeriod - clickDur) : clickDur;
-                    ttDynConfirm[0] = { TT_PHASE_HIGH, clickDur };
-                    ttDynConfirm[1] = { 0, beatRest };
-                    ttDynConfirm[2] = { TT_PHASE_HIGH, clickDur };
-                    ttDynConfirm[3] = { 0, beatRest };
+                    ttDynConfirm[0] = { 0, beatRest };              // wait after 6th tap
+                    ttDynConfirm[1] = { TT_PHASE_HIGH, clickDur };  // confirm click 1
+                    ttDynConfirm[2] = { 0, beatRest };              // beat gap
+                    ttDynConfirm[3] = { TT_PHASE_HIGH, clickDur };  // confirm click 2
+                    ttDynConfirm[4] = { 0, beatRest };              // tail silence
 
                     ttState = TT_CONFIRM;
                     ttLedFlashTimer = 0;
                     ttInactivityTimer = 0;
-                    tt_start_sequence(ttDynConfirm, 4);
+                    tt_start_sequence(ttDynConfirm, 5);
                 } else {
                     // Wait for next tap
                     ttState = TT_WAIT_TAP;
