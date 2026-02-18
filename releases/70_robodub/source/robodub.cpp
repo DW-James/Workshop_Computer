@@ -1258,7 +1258,10 @@ class Robodub : public ComputerCard
     uint32_t ttToneTimer;            // Samples remaining in current step
     uint8_t  ttSequenceStep;         // Current step index in sequence
     uint8_t  ttSequenceLength;       // Total steps in current sequence
-    const ToneStep *ttCurrentSeq;    // Pointer to announce/confirm sequence
+    const ToneStep *ttCurrentSeq;    // Pointer to announce/confirm/dynamic sequence
+
+    // Dynamic confirmation sequence (built at confirm time from tapped tempo)
+    ToneStep ttDynConfirm[4];        // click-silence-click-silence at tapped BPM
 
     // Tap collection
     uint8_t  ttTapCount;             // Number of taps collected (0-6)
@@ -1519,10 +1522,20 @@ class Robodub : public ComputerCard
                 if (ttTapCount >= TT_TAPS_REQUIRED) {
                     // All taps collected — calculate and confirm
                     tt_calculate_tempo();
+
+                    // Build confirmation: 2 clicks at the tapped tempo.
+                    // Each beat = click (30ms) + silence (rest of beat).
+                    uint32_t clickDur = TT_DUR_30MS;
+                    uint32_t beatRest = (clockPeriod > clickDur) ? (clockPeriod - clickDur) : clickDur;
+                    ttDynConfirm[0] = { TT_PHASE_HIGH, clickDur };
+                    ttDynConfirm[1] = { 0, beatRest };
+                    ttDynConfirm[2] = { TT_PHASE_HIGH, clickDur };
+                    ttDynConfirm[3] = { 0, beatRest };
+
                     ttState = TT_CONFIRM;
                     ttLedFlashTimer = 0;
                     ttInactivityTimer = 0;
-                    tt_start_sequence(TT_SEQ_CONFIRM, TT_SEQ_CONFIRM_LEN);
+                    tt_start_sequence(ttDynConfirm, 4);
                 } else {
                     // Wait for next tap
                     ttState = TT_WAIT_TAP;
