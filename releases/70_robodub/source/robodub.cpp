@@ -710,20 +710,22 @@ static constexpr uint32_t TT_DUR_15MS  =  720;
 static constexpr uint32_t TT_DUR_100MS = 4800;
 
 // "Tap Tempo" announcement: HIGH-silence-LOW-silence-LOW
+// Durations are ~4× the metronome click for a clear, unhurried announcement.
 static const ToneStep TT_SEQ_ANNOUNCE[] = {
-    { TT_PHASE_HIGH, TT_DUR_50MS  },  // "Tap"
-    { 0,             TT_DUR_30MS  },  // silence
-    { TT_PHASE_LOW,  TT_DUR_50MS  },  // "Tem-"
-    { 0,             TT_DUR_15MS  },  // silence
-    { TT_PHASE_LOW,  TT_DUR_80MS  },  // "-po"
+    { TT_PHASE_HIGH, TT_DUR_50MS * 4  },  // "Tap"    (200ms)
+    { 0,             TT_DUR_30MS * 4   },  // silence  (120ms)
+    { TT_PHASE_LOW,  TT_DUR_50MS * 4   },  // "Tem-"  (200ms)
+    { 0,             TT_DUR_15MS * 4   },  // silence  (60ms)
+    { TT_PHASE_LOW,  TT_DUR_80MS * 4   },  // "-po"   (320ms)
 };
 static constexpr uint8_t TT_SEQ_ANNOUNCE_LEN = 5;
 
 // Confirmation: short beep + silence + long beep
+// Same 4× scaling as announcement for a clear, unhurried confirmation.
 static const ToneStep TT_SEQ_CONFIRM[] = {
-    { TT_PHASE_HIGH, TT_DUR_30MS  },  // short beep
-    { 0,             TT_DUR_15MS  },  // silence
-    { TT_PHASE_HIGH, TT_DUR_100MS },  // long beep
+    { TT_PHASE_HIGH, TT_DUR_30MS * 4  },  // short beep (120ms)
+    { 0,             TT_DUR_15MS * 4   },  // silence    (60ms)
+    { TT_PHASE_HIGH, TT_DUR_100MS * 4  },  // long beep  (400ms)
 };
 static constexpr uint8_t TT_SEQ_CONFIRM_LEN = 3;
 
@@ -1331,9 +1333,11 @@ class Robodub : public ComputerCard
             return;
         }
 
-        // Valid flick: Up->Middle or Middle->Up
-        if ((prev == Switch::Up && sw == Switch::Middle) ||
-            (prev == Switch::Middle && sw == Switch::Up))
+        // Valid flick: only count Up->Middle (one direction only).
+        // A physical flick is Up->Middle->Up, but we only count the
+        // Up->Middle half. This means 4 physical round-trip flicks = 4 counts,
+        // not 8. Middle->Up is the return stroke and is ignored.
+        if (prev == Switch::Up && sw == Switch::Middle)
         {
             ttFlickDebounce = TT_FLICK_DEBOUNCE;
 
@@ -1761,6 +1765,10 @@ public:
         //   DOWN (momentary): capture audio live AND feed it to the delay
         //   MIDDLE (default): sample is locked; Pulse In 2 replays it
         //   UP (hold):        Pulse In 2 captures fresh + feeds delay
+        //
+        // During tap tempo: skip all gate/sample/pulse2 processing.
+        // The switch is used exclusively for tap detection, and Pulse In 2
+        // must be ignored to prevent sample triggers interfering with tones.
         bool currentPulse2 = PulseIn2();
         if (pulse2Lockout > 0) pulse2Lockout--;
         bool pulse2Rising = currentPulse2 && !lastPulse2 && (pulse2Lockout == 0);
@@ -1769,7 +1777,12 @@ public:
 
         int32_t delayInput = 0;
 
-        if (switchPos == Switch::Down)
+        if (ttState != TT_OFF)
+        {
+            // Tap tempo active — no gate, no sample buffer, no Pulse In 2.
+            // delayInput stays 0, delay tail rings out naturally.
+        }
+        else if (switchPos == Switch::Down)
         {
             // Momentary capture: start recording on switch press,
             // feed audio directly to the delay while held
@@ -1820,9 +1833,6 @@ public:
             // its existing content (feedback path still active).
         }
         lastSwitchDown = (switchPos == Switch::Down);
-
-        // During tap tempo: no new audio enters the delay — tail rings out naturally
-        if (ttState != TT_OFF) delayInput = 0;
 
         // ---- Feedback amount (Main knob, custom curve) ----
         int32_t fbAmount = get_feedback(mainKnob);
