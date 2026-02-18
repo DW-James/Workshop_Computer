@@ -1618,17 +1618,17 @@ public:
 
         // Two narrow dips to tame resonant peaks from cumulative
         // LP+HP phase shift in the feedback loop.
-        // Dip 1: fundamental at ~1190Hz (bandpass 1080-1300Hz, 15%)
+        // Dip 1: fundamental at ~1178Hz (bandpass 1100-1260Hz, 20%)
         // Dip 2: 2nd harmonic at ~2360Hz (bandpass 2100-2700Hz, 15%)
-        // Coefficients: 10466≈1300Hz, 8741≈1080Hz, 20525≈2700Hz, 16277≈2100Hz
+        // Coefficients: 10155≈1260Hz, 8886≈1100Hz, 20525≈2700Hz, 16277≈2100Hz
         {
-            int32_t hiL = filter_lp(&dipHi_L, 10466, feedbackL);
-            int32_t loL = filter_lp(&dipLo_L, 8741, feedbackL);
-            feedbackL -= ((hiL - loL) * 154) >> 10;  // 154/1024 ≈ 15%
+            int32_t hiL = filter_lp(&dipHi_L, 10155, feedbackL);
+            int32_t loL = filter_lp(&dipLo_L, 8886, feedbackL);
+            feedbackL -= ((hiL - loL) * 205) >> 10;  // 205/1024 ≈ 20%
 
-            int32_t hiR = filter_lp(&dipHi_R, 10466, feedbackR);
-            int32_t loR = filter_lp(&dipLo_R, 8741, feedbackR);
-            feedbackR -= ((hiR - loR) * 154) >> 10;
+            int32_t hiR = filter_lp(&dipHi_R, 10155, feedbackR);
+            int32_t loR = filter_lp(&dipLo_R, 8886, feedbackR);
+            feedbackR -= ((hiR - loR) * 205) >> 10;
         }
         {
             int32_t hiL = filter_lp(&dip2Hi_L, 20525, feedbackL);
