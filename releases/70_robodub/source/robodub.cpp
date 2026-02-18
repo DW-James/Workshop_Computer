@@ -1610,19 +1610,19 @@ public:
         feedbackL = filter_hp(&dcBlockL, 1022, feedbackL);
         feedbackR = filter_hp(&dcBlockR, 1022, feedbackR);
 
-        // Narrow dip at ~1190Hz to tame resonant peak from cumulative
-        // LP+HP phase shift in the feedback loop. Bandpass = LP@1300Hz
-        // minus LP@1080Hz, subtract ~15% of that band from the signal.
-        // Narrow band (~220Hz wide), gentle cut (~-1.4dB at centre).
-        // Coefficients: 10466 ≈ 1300Hz, 8741 ≈ 1080Hz at 48kHz.
+        // Narrow dip at ~1200Hz to tame resonant peak from cumulative
+        // LP+HP phase shift in the feedback loop. Bandpass = LP@1400Hz
+        // minus LP@1050Hz, subtract ~22% of that band from the signal.
+        // Band ~350Hz wide, centred ~1225Hz, cut ~-2.2dB at centre.
+        // Coefficients: 11277 ≈ 1400Hz, 8498 ≈ 1050Hz at 48kHz.
         {
-            int32_t hiL = filter_lp(&dipHi_L, 10466, feedbackL);
-            int32_t loL = filter_lp(&dipLo_L, 8741, feedbackL);
-            feedbackL -= ((hiL - loL) * 154) >> 10;  // 154/1024 ≈ 15%
+            int32_t hiL = filter_lp(&dipHi_L, 11277, feedbackL);
+            int32_t loL = filter_lp(&dipLo_L, 8498, feedbackL);
+            feedbackL -= ((hiL - loL) * 225) >> 10;  // 225/1024 ≈ 22%
 
-            int32_t hiR = filter_lp(&dipHi_R, 10466, feedbackR);
-            int32_t loR = filter_lp(&dipLo_R, 8741, feedbackR);
-            feedbackR -= ((hiR - loR) * 154) >> 10;
+            int32_t hiR = filter_lp(&dipHi_R, 11277, feedbackR);
+            int32_t loR = filter_lp(&dipLo_R, 8498, feedbackR);
+            feedbackR -= ((hiR - loR) * 225) >> 10;
         }
 
         // Hard clamp to DAC range before writing back to delay
