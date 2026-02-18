@@ -1389,14 +1389,14 @@ class Robodub : public ComputerCard
             sum += ttTapTimestamps[i + 1] - ttTapTimestamps[i];
         uint32_t avgInterval = sum / count;
 
-        // Zone normalisation: keep the interval within the delay buffer range.
-        // Too long (>680ms / 32640 samples): halve until it fits.
-        // Too short (<100ms / 4800 samples): double until it fits.
+        // Find the longest multiple of the tapped interval that fits
+        // in the delay buffer. This gives the slowest feel at the chosen BPM.
+        // e.g. at 200 BPM (~300ms), 2× = 600ms fits in 680ms buffer → use 600ms.
+        // At 106 BPM (~566ms), 1× fits but 2× = 1132ms doesn't → use 566ms.
+        // If the raw interval is too long, halve until it fits.
         while (avgInterval > MAX_DELAY_SAMPLES) avgInterval >>= 1;
-        while (avgInterval < MIN_DELAY_SAMPLES) avgInterval <<= 1;
-
-        // The tapped interval is the delay time directly.
         uint32_t newDelay = avgInterval;
+        while ((newDelay << 1) <= MAX_DELAY_SAMPLES) newDelay <<= 1;
 
         // Clamp to valid range (safety — normalisation above should handle it)
         if (newDelay < MIN_DELAY_SAMPLES) newDelay = MIN_DELAY_SAMPLES;
