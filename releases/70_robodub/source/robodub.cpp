@@ -671,6 +671,77 @@ static volatile SharedSidechain *g_sidechain = nullptr;
 
 
 // ============================================================================
+// Tap tempo — manual BPM entry via switch gestures
+// ============================================================================
+// Entry: 4 rapid Up<->Middle switch flicks within 3 seconds.
+// Plays a "Tap Tempo" announcement, then collects 6 taps (Switch::Down).
+// Averages 5 intervals, normalises BPM to 60-200 range, converts to
+// dotted-eighth delay time. Switch::Up during tapping aborts/restarts.
+// External clock arriving on Pulse In 1 overrides tap tempo.
+
+enum TapTempoState : uint8_t {
+    TT_OFF = 0,       // Normal operation. Flick detector runs passively.
+    TT_ANNOUNCE,       // Playing "Tap Tempo" tone sequence.
+    TT_WAIT_TAP,       // Waiting for next Down toggle.
+    TT_PLAY_TONE,      // Playing metronome click after a tap.
+    TT_CONFIRM,        // Playing confirmation tones + LED flash.
+    TT_EXIT            // Storing result, returning to normal.
+};
+
+// A step in a tone sequence: frequency (phase increment) + duration in samples.
+// phaseInc == 0 means silence.
+struct ToneStep {
+    uint32_t phaseInc;   // 32-bit phase increment per sample (0 = silence)
+    uint32_t duration;   // Duration in samples at 48kHz
+};
+
+// Phase increments for 32-bit accumulator at 48kHz:
+//   phaseInc = freq * (2^32 / 48000)
+//   1760 Hz (A6): 1760 * 89478.4853 ≈ 157,481,727
+//    880 Hz (A5):  880 * 89478.4853 ≈  78,740,863
+static constexpr uint32_t TT_PHASE_HIGH = 157481727u;  // 1760 Hz (A6)
+static constexpr uint32_t TT_PHASE_LOW  =  78740863u;  //  880 Hz (A5)
+
+// Duration constants (samples at 48kHz)
+static constexpr uint32_t TT_DUR_50MS  = 2400;
+static constexpr uint32_t TT_DUR_80MS  = 3840;
+static constexpr uint32_t TT_DUR_30MS  = 1440;
+static constexpr uint32_t TT_DUR_15MS  =  720;
+static constexpr uint32_t TT_DUR_100MS = 4800;
+
+// "Tap Tempo" announcement: HIGH-silence-LOW-silence-LOW
+static const ToneStep TT_SEQ_ANNOUNCE[] = {
+    { TT_PHASE_HIGH, TT_DUR_50MS  },  // "Tap"
+    { 0,             TT_DUR_30MS  },  // silence
+    { TT_PHASE_LOW,  TT_DUR_50MS  },  // "Tem-"
+    { 0,             TT_DUR_15MS  },  // silence
+    { TT_PHASE_LOW,  TT_DUR_80MS  },  // "-po"
+};
+static constexpr uint8_t TT_SEQ_ANNOUNCE_LEN = 5;
+
+// Confirmation: short beep + silence + long beep
+static const ToneStep TT_SEQ_CONFIRM[] = {
+    { TT_PHASE_HIGH, TT_DUR_30MS  },  // short beep
+    { 0,             TT_DUR_15MS  },  // silence
+    { TT_PHASE_HIGH, TT_DUR_100MS },  // long beep
+};
+static constexpr uint8_t TT_SEQ_CONFIRM_LEN = 3;
+
+// Flick detection constants
+static constexpr uint32_t TT_FLICK_DEBOUNCE  = 240;     // 5ms debounce lockout
+static constexpr uint32_t TT_FLICK_WINDOW    = 144000;  // 3-second window
+static constexpr uint8_t  TT_FLICKS_REQUIRED = 4;       // Up<->Middle flicks to enter
+
+// Tap collection
+static constexpr uint8_t  TT_TAPS_REQUIRED   = 6;
+static constexpr uint32_t TT_INACTIVITY_MAX  = 480000;  // 10 seconds
+
+// Metronome volume: amplitude = sine_lookup * (vol * 205) >> 12
+// At vol=5: peak ≈ 1025 (quarter of DAC range)
+static constexpr uint8_t  TT_DEFAULT_VOLUME  = 5;
+
+
+// ============================================================================
 // Clock / tempo detection
 // ============================================================================
 // Pulse In 1 = quarter-note clock.
@@ -1169,6 +1240,315 @@ class Robodub : public ComputerCard
     // --- Sidechain ducking (core 1) ---
     SharedSidechain sidechain;
 
+    // --- Tap tempo ---
+    TapTempoState ttState;
+
+    // Gesture detection
+    int32_t  ttLastSwitchForFlick;   // Previous switch position for edge detection
+    uint32_t ttFlickTimestamps[4];   // Ring buffer of last 4 flick timestamps
+    uint8_t  ttFlickCount;           // Number of valid flicks in window
+    uint32_t ttFlickDebounce;        // Debounce countdown (samples)
+    uint32_t ttSampleCounter;        // Global sample counter for timestamps
+
+    // Tone generation
+    uint32_t ttTonePhase;            // 32-bit phase accumulator
+    uint32_t ttTonePhaseInc;         // Current phase increment (0 = silence)
+    uint32_t ttToneTimer;            // Samples remaining in current step
+    uint8_t  ttSequenceStep;         // Current step index in sequence
+    uint8_t  ttSequenceLength;       // Total steps in current sequence
+    const ToneStep *ttCurrentSeq;    // Pointer to announce/confirm sequence
+
+    // Tap collection
+    uint8_t  ttTapCount;             // Number of taps collected (0-6)
+    uint32_t ttTapTimestamps[6];     // Sample counter at each tap
+    bool     ttLastSwitchDown;       // Track Down transitions for tap detection
+
+    // LED + timing
+    uint32_t ttLedFlashTimer;        // Counter for confirmation LED flash
+    uint32_t ttInactivityTimer;      // Counts up since last tap / state entry
+    uint8_t  ttMetronomeVolume;      // 1-10 (default 5)
+    bool     tapTempoLocked;         // Prevents clock timeout from clearing sync
+
+    // --- Tap tempo helper functions ---
+
+    // Start playing a tone sequence (announcement or confirmation)
+    inline void tt_start_sequence(const ToneStep *seq, uint8_t len)
+    {
+        ttCurrentSeq = seq;
+        ttSequenceLength = len;
+        ttSequenceStep = 0;
+        ttTonePhaseInc = seq[0].phaseInc;
+        ttToneTimer = seq[0].duration;
+        ttTonePhase = 0;
+    }
+
+    // Advance the current tone sequence by one sample.
+    // Returns true when the entire sequence has finished.
+    inline bool tt_advance_sequence()
+    {
+        if (ttToneTimer > 0) {
+            ttToneTimer--;
+            return false;
+        }
+        // Current step finished — advance to next
+        ttSequenceStep++;
+        if (ttSequenceStep >= ttSequenceLength) return true;  // Sequence done
+        ttTonePhaseInc = ttCurrentSeq[ttSequenceStep].phaseInc;
+        ttToneTimer = ttCurrentSeq[ttSequenceStep].duration;
+        ttTonePhase = 0;  // Reset phase for clean tone start
+        return false;
+    }
+
+    // Generate one audio sample of the current tone.
+    // Returns a signed value suitable for mixing into audio output.
+    inline int32_t __not_in_flash_func(tt_generate_tone)()
+    {
+        if (ttTonePhaseInc == 0) return 0;  // Silence step
+        ttTonePhase += ttTonePhaseInc;
+        int32_t raw = sine_lookup(ttTonePhase);  // ±4096
+        // Scale by volume: amplitude = raw * (vol * 205) >> 12
+        // At vol=5: (5 * 205) = 1025, >> 12 gives peak ≈ 1025
+        return (raw * (ttMetronomeVolume * 205)) >> 12;
+    }
+
+    // Detect 4 rapid Up<->Middle switch flicks to enter tap tempo mode.
+    // Called every sample. Only transitions between Up and Middle count;
+    // any involvement of Down resets the counter (isolates from normal play).
+    inline void __not_in_flash_func(tt_detect_flick)(int32_t sw)
+    {
+        // Debounce: wait after last valid transition
+        if (ttFlickDebounce > 0) { ttFlickDebounce--; return; }
+
+        // Only care about transitions
+        if (sw == ttLastSwitchForFlick) return;
+
+        int32_t prev = ttLastSwitchForFlick;
+        ttLastSwitchForFlick = sw;
+
+        // Any involvement of Down resets — this is normal play behaviour
+        if (sw == Switch::Down || prev == Switch::Down) {
+            ttFlickCount = 0;
+            return;
+        }
+
+        // Valid flick: Up->Middle or Middle->Up
+        if ((prev == Switch::Up && sw == Switch::Middle) ||
+            (prev == Switch::Middle && sw == Switch::Up))
+        {
+            ttFlickDebounce = TT_FLICK_DEBOUNCE;
+
+            // Store timestamp in ring buffer
+            uint8_t idx = ttFlickCount < TT_FLICKS_REQUIRED
+                        ? ttFlickCount
+                        : (TT_FLICKS_REQUIRED - 1);
+            // Shift buffer if full
+            if (ttFlickCount >= TT_FLICKS_REQUIRED) {
+                for (uint8_t i = 0; i < TT_FLICKS_REQUIRED - 1; i++)
+                    ttFlickTimestamps[i] = ttFlickTimestamps[i + 1];
+                idx = TT_FLICKS_REQUIRED - 1;
+            }
+            ttFlickTimestamps[idx] = ttSampleCounter;
+            if (ttFlickCount < TT_FLICKS_REQUIRED) ttFlickCount++;
+
+            // Check if we have 4 flicks within the time window
+            if (ttFlickCount >= TT_FLICKS_REQUIRED) {
+                uint32_t oldest = ttFlickTimestamps[0];
+                uint32_t newest = ttFlickTimestamps[TT_FLICKS_REQUIRED - 1];
+                if ((newest - oldest) <= TT_FLICK_WINDOW) {
+                    // Enter tap tempo mode!
+                    ttFlickCount = 0;
+                    ttState = TT_ANNOUNCE;
+                    ttTapCount = 0;
+                    ttLastSwitchDown = false;
+                    ttInactivityTimer = 0;
+                    tt_start_sequence(TT_SEQ_ANNOUNCE, TT_SEQ_ANNOUNCE_LEN);
+                }
+            }
+        }
+    }
+
+    // Calculate delay time from 6 taps.
+    // Averages 5 intervals, normalises BPM to 60-200 range,
+    // converts to dotted-eighth delay time in samples.
+    inline void tt_calculate_tempo()
+    {
+        if (ttTapCount < 2) return;
+
+        // Average the intervals between consecutive taps
+        uint32_t sum = 0;
+        uint8_t count = ttTapCount - 1;
+        for (uint8_t i = 0; i < count; i++)
+            sum += ttTapTimestamps[i + 1] - ttTapTimestamps[i];
+        uint32_t avgInterval = sum / count;
+
+        // Convert to BPM: BPM = 60 * 48000 / avgInterval = 2,880,000 / avgInterval
+        // We do the zone normalisation in the interval domain to avoid floats.
+        // BPM < 60 means interval > 48000 → double BPM (halve interval)
+        // BPM > 200 means interval < 14400 → halve BPM (double interval)
+        while (avgInterval > 48000) avgInterval >>= 1;   // BPM was < 60
+        while (avgInterval < 14400) avgInterval <<= 1;    // BPM was > 200
+
+        // Dotted eighth = 3/8 of a quarter note
+        // quarterPeriod = avgInterval (already in samples)
+        // delayTime = (avgInterval * 3) >> 3
+        uint32_t newDelay = (avgInterval * 3) >> 3;
+
+        // Clamp to valid range
+        if (newDelay < MIN_DELAY_SAMPLES) newDelay = MIN_DELAY_SAMPLES;
+        if (newDelay > MAX_DELAY_SAMPLES) newDelay = MAX_DELAY_SAMPLES;
+
+        // Store — the existing smooth transition handles the glide
+        clockPeriod = avgInterval;
+        delayTimeSamples = newDelay;
+        clockSynced = true;
+        tapTempoLocked = true;
+    }
+
+    // Update LEDs during tap tempo mode (bypasses normal LED control).
+    // Called at 100Hz (inside the existing ledCounter block).
+    inline void tt_update_leds()
+    {
+        switch (ttState) {
+        case TT_ANNOUNCE:
+            // All LEDs off during announcement
+            for (int i = 0; i < 6; i++) LedOn(i, false);
+            break;
+
+        case TT_WAIT_TAP:
+        case TT_PLAY_TONE:
+            // Light LEDs 0..(tapCount-1) to show progress
+            for (int i = 0; i < 6; i++)
+                LedOn(i, i < (int)ttTapCount);
+            break;
+
+        case TT_CONFIRM:
+            // Flash all 6 LEDs at ~5Hz during confirmation
+            {
+                bool on = (ttLedFlashTimer / 4800) & 1;  // Toggle every 100ms
+                for (int i = 0; i < 6; i++) LedOn(i, on);
+            }
+            break;
+
+        default:
+            break;
+        }
+    }
+
+    // Main tap tempo state machine. Called every sample when ttState != TT_OFF.
+    inline void __not_in_flash_func(tt_update)(int32_t sw)
+    {
+        ttInactivityTimer++;
+
+        switch (ttState) {
+        case TT_ANNOUNCE:
+            // Play announcement sequence
+            if (tt_advance_sequence()) {
+                // Announcement done — wait for first tap
+                ttState = TT_WAIT_TAP;
+                ttInactivityTimer = 0;
+                ttTonePhaseInc = 0;
+            }
+            break;
+
+        case TT_WAIT_TAP:
+            // Check for abort: Switch::Up restarts
+            if (sw == Switch::Up) {
+                ttState = TT_ANNOUNCE;
+                ttTapCount = 0;
+                ttInactivityTimer = 0;
+                ttLastSwitchDown = false;
+                tt_start_sequence(TT_SEQ_ANNOUNCE, TT_SEQ_ANNOUNCE_LEN);
+                break;
+            }
+
+            // Check for inactivity timeout
+            if (ttInactivityTimer > TT_INACTIVITY_MAX) {
+                ttState = TT_OFF;
+                break;
+            }
+
+            // Detect Down press (rising edge)
+            {
+                bool isDown = (sw == Switch::Down);
+                if (isDown && !ttLastSwitchDown) {
+                    // Record this tap
+                    ttTapTimestamps[ttTapCount] = ttSampleCounter;
+                    ttTapCount++;
+                    ttInactivityTimer = 0;
+
+                    // Start metronome click: HIGH for tap 1, LOW for the rest
+                    ToneStep click;
+                    click.phaseInc = (ttTapCount == 1) ? TT_PHASE_HIGH : TT_PHASE_LOW;
+                    click.duration = TT_DUR_30MS;
+
+                    // We can't point to a local, so set tone state directly
+                    ttTonePhaseInc = click.phaseInc;
+                    ttToneTimer = click.duration;
+                    ttTonePhase = 0;
+                    ttCurrentSeq = nullptr;  // Not using a sequence for single clicks
+                    ttSequenceStep = 0;
+                    ttSequenceLength = 0;
+
+                    ttState = TT_PLAY_TONE;
+                }
+                ttLastSwitchDown = isDown;
+            }
+            break;
+
+        case TT_PLAY_TONE:
+            // Check for abort: Switch::Up restarts
+            if (sw == Switch::Up) {
+                ttState = TT_ANNOUNCE;
+                ttTapCount = 0;
+                ttInactivityTimer = 0;
+                ttLastSwitchDown = false;
+                tt_start_sequence(TT_SEQ_ANNOUNCE, TT_SEQ_ANNOUNCE_LEN);
+                break;
+            }
+
+            // Play the click tone (single step, no sequence)
+            if (ttToneTimer > 0) {
+                ttToneTimer--;
+            } else {
+                // Click done — check if we have enough taps
+                ttTonePhaseInc = 0;
+                if (ttTapCount >= TT_TAPS_REQUIRED) {
+                    // All taps collected — calculate and confirm
+                    tt_calculate_tempo();
+                    ttState = TT_CONFIRM;
+                    ttLedFlashTimer = 0;
+                    ttInactivityTimer = 0;
+                    tt_start_sequence(TT_SEQ_CONFIRM, TT_SEQ_CONFIRM_LEN);
+                } else {
+                    // Wait for next tap
+                    ttState = TT_WAIT_TAP;
+                    ttInactivityTimer = 0;
+                    // Track Down state — user might still be holding it
+                    ttLastSwitchDown = (sw == Switch::Down);
+                }
+            }
+            break;
+
+        case TT_CONFIRM:
+            ttLedFlashTimer++;
+            if (tt_advance_sequence()) {
+                // Confirmation done — exit
+                ttState = TT_EXIT;
+            }
+            break;
+
+        case TT_EXIT:
+            // clockPeriod and delayTimeSamples already set by tt_calculate_tempo().
+            // tapTempoLocked already true. Just return to normal.
+            ttState = TT_OFF;
+            ttTonePhaseInc = 0;
+            break;
+
+        default:
+            break;
+        }
+    }
+
 public:
     Robodub()
     {
@@ -1248,6 +1628,27 @@ public:
         g_sidechain = &sidechain;
         multicore_launch_core1(core1_sidechain_entry);
 
+        // Tap tempo — all off / zeroed
+        ttState = TT_OFF;
+        ttLastSwitchForFlick = -1;  // Invalid — forces first edge
+        ttFlickCount = 0;
+        ttFlickDebounce = 0;
+        ttSampleCounter = 0;
+        for (int i = 0; i < 4; i++) ttFlickTimestamps[i] = 0;
+        ttTonePhase = 0;
+        ttTonePhaseInc = 0;
+        ttToneTimer = 0;
+        ttSequenceStep = 0;
+        ttSequenceLength = 0;
+        ttCurrentSeq = nullptr;
+        ttTapCount = 0;
+        for (int i = 0; i < 6; i++) ttTapTimestamps[i] = 0;
+        ttLastSwitchDown = false;
+        ttLedFlashTimer = 0;
+        ttInactivityTimer = 0;
+        ttMetronomeVolume = TT_DEFAULT_VOLUME;
+        tapTempoLocked = false;
+
         EnableNormalisationProbe();
     }
 
@@ -1263,6 +1664,9 @@ public:
         if (startupCounter < 96000) { startupCounter++; AudioOut1(0); AudioOut2(0); return; }
         if (!sidechain.ready) sidechain.ready = true;  // Signal core 1: audio is up
 
+        // ---- Tap tempo: sample counter + flick detection (always runs) ----
+        ttSampleCounter++;
+
         // ---- Read controls ----
         int32_t mainKnob  = KnobVal(Knob::Main);   // Feedback amount
         int32_t chaosKnobRaw = KnobVal(Knob::X);     // Chaos / density
@@ -1272,12 +1676,21 @@ public:
         int32_t chaosKnob = chaosKnobRaw;
         int32_t switchPos  = SwitchVal();
 
+        // Flick detection runs in all modes (lightweight, ~10 cycles)
+        if (ttState == TT_OFF) tt_detect_flick(switchPos);
+
+        // Run tap tempo state machine if active
+        if (ttState != TT_OFF) tt_update(switchPos);
+
         // ---- Clock detection (Pulse In 1 = quarter notes) ----
         // Measures time between rising edges. Delay = 3/8 of period
         // (dotted eighth note). Smoothed to avoid glitchy jumps.
         clockCounter++;
         if (PulseIn1RisingEdge())
         {
+            // Real external clock overrides tap tempo
+            tapTempoLocked = false;
+
             // Accept clock periods between ~150ms and ~1.5s (40-400 BPM)
             if (clockCounter > 14400 && clockCounter < 72000)
             {
@@ -1299,8 +1712,9 @@ public:
             sixteenthPhase = 0;
             sixteenthState = true;  // Fire on the downbeat
         }
-        // If no clock for 2 seconds, fall back to default tempo
-        if (clockCounter > 96000) clockSynced = false;
+        // If no clock for 2 seconds, fall back to default tempo.
+        // Don't clear sync if tap tempo set it — there's no external clock to timeout.
+        if (clockCounter > 96000 && !tapTempoLocked) clockSynced = false;
 
         if (clockSynced)
         {
@@ -1406,6 +1820,9 @@ public:
             // its existing content (feedback path still active).
         }
         lastSwitchDown = (switchPos == Switch::Down);
+
+        // During tap tempo: no new audio enters the delay — tail rings out naturally
+        if (ttState != TT_OFF) delayInput = 0;
 
         // ---- Feedback amount (Main knob, custom curve) ----
         int32_t fbAmount = get_feedback(mainKnob);
@@ -1875,6 +2292,13 @@ public:
             outR = finalR;
         }
 
+        // Mix metronome tone during tap tempo (mono, both channels)
+        if (ttState != TT_OFF) {
+            int32_t tone = tt_generate_tone();
+            outL += tone;
+            outR += tone;
+        }
+
         AudioOut1((int16_t)clamp(outL, -2047, 2047));
         AudioOut2((int16_t)clamp(outR, -2047, 2047));
 
@@ -1977,37 +2401,42 @@ public:
         {
             ledCounter = 0;
 
-            // Peak-hold envelope for output level metering
-            int32_t absOL2 = outL < 0 ? -outL : outL;
-            int32_t absOR2 = outR < 0 ? -outR : outR;
-            int32_t peak2 = absOL2 > absOR2 ? absOL2 : absOR2;
-            peakLevel = (peakLevel * 240) >> 8;  // Slow decay
-            if (peak2 > peakLevel) peakLevel = peak2;
+            if (ttState != TT_OFF) {
+                // Tap tempo controls LEDs — bypass normal display
+                tt_update_leds();
+            } else {
+                // Peak-hold envelope for output level metering
+                int32_t absOL2 = outL < 0 ? -outL : outL;
+                int32_t absOR2 = outR < 0 ? -outR : outR;
+                int32_t peak2 = absOL2 > absOR2 ? absOL2 : absOR2;
+                peakLevel = (peakLevel * 240) >> 8;  // Slow decay
+                if (peak2 > peakLevel) peakLevel = peak2;
 
-            // LED 0: clip warning
-            LedOn(0, clipHold > 0);
+                // LED 0: clip warning
+                LedOn(0, clipHold > 0);
 
-            // LED 1: output level brightness
-            int32_t levelBright = peakLevel << 1;
-            if (levelBright > 4095) levelBright = 4095;
-            LedBrightness(1, levelBright);
+                // LED 1: output level brightness
+                int32_t levelBright = peakLevel << 1;
+                if (levelBright > 4095) levelBright = 4095;
+                LedBrightness(1, levelBright);
 
-            // LED 2: Pulse In 2 activity
-            LedOn(2, currentPulse2);
+                // LED 2: Pulse In 2 activity
+                LedOn(2, currentPulse2);
 
-            // LED 3: sample trigger flash (bright for ~100ms on trigger)
-            LedOn(3, sampleTrigFlash > 0);
+                // LED 3: sample trigger flash (bright for ~100ms on trigger)
+                LedOn(3, sampleTrigFlash > 0);
 
-            // LED 4: Pulse In 1 — brief flash on each rising edge.
-            // Shows clock activity whether synced or not.
-            // clockCounter resets to 0 on each rising edge, so
-            // clockCounter < 2400 gives a ~50ms flash per beat.
-            LedOn(4, clockCounter < 2400);
+                // LED 4: Pulse In 1 — brief flash on each rising edge.
+                // Shows clock activity whether synced or not.
+                // clockCounter resets to 0 on each rising edge, so
+                // clockCounter < 2400 gives a ~50ms flash per beat.
+                LedOn(4, clockCounter < 2400);
 
-            // LED 5: bar pulse — brief flash on beat 1 of each bar.
-            // barPulseHold counts down from a short value.
-            // Using 2400 samples = ~50ms flash.
-            LedOn(5, barPulseHold > 0);
+                // LED 5: bar pulse — brief flash on beat 1 of each bar.
+                // barPulseHold counts down from a short value.
+                // Using 2400 samples = ~50ms flash.
+                LedOn(5, barPulseHold > 0);
+            }
         }
     }
 };
