@@ -505,8 +505,8 @@ static BandCompParams comp_params[NUM_BANDS] = {
 #define SC_DUCK_THRESHOLD 40    // Sidechain level to start ducking (very sensitive)
 // inv_duck_range: precomputed (1<<16)/200 = 327, avoids division on M0+
 #define SC_INV_DUCK_RANGE 327
-#define SC_ENV_ATTACK_COEFF  1351   // ~1ms attack (at 48kHz — core 1 synced to sample rate)
-#define SC_ENV_RELEASE_COEFF 14     // ~100ms release (slow pump)
+#define SC_ENV_ATTACK_COEFF  13107  // ~1ms attack (at ~4.8kHz decimated rate)
+#define SC_ENV_RELEASE_COEFF 131    // ~100ms release (slow pump)
 
 // Gain smoother coefficient (48kHz, ~1ms time constant)
 #define GAIN_SMOOTH_COEFF   400
@@ -645,13 +645,15 @@ static inline void __not_in_flash_func(multiband_update_gains)(
 // runs envelope followers, computes per-band ducking gain, and writes
 // results back to shared volatiles for core 0 to apply.
 //
-// Core 1 waits for core 0 to write a new sample (via sample_tick),
-// then processes it. This naturally syncs core 1 to 48kHz — one
-// iteration per audio sample. The envelope follower coefficients
-// are tuned for this rate.
+// Core 1 processes every 10th sample (~4.8kHz), using sample_tick to
+// avoid re-processing the same sample. This keeps core 1 off the bus
+// most of the time, preventing contention with core 0's 48kHz ISR.
+// Envelope coefficients are tuned for the ~4.8kHz update rate.
 
 // Global pointer so the static core 1 entry can find the MultibandState
 static MultibandState *g_mb_ptr = nullptr;
+
+#define SC_DECIM 10  // Process every 10th sample on core 1
 
 static void __not_in_flash_func(core1_sidechain_loop)()
 {
@@ -661,9 +663,9 @@ static void __not_in_flash_func(core1_sidechain_loop)()
 
     while (true)
     {
-        // Wait for core 0 to provide a new sample
+        // Wait until core 0 has advanced at least SC_DECIM samples
         uint32_t tick = mb->shared.sample_tick;
-        if (tick == last_tick) continue;
+        if ((tick - last_tick) < SC_DECIM) continue;
         last_tick = tick;
 
         // If compressor is bypassed, write unity gains
