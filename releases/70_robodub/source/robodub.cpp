@@ -505,8 +505,8 @@ static BandCompParams comp_params[NUM_BANDS] = {
 #define SC_DUCK_THRESHOLD 40    // Sidechain level to start ducking (very sensitive)
 // inv_duck_range: precomputed (1<<16)/200 = 327, avoids division on M0+
 #define SC_INV_DUCK_RANGE 327
-#define SC_ENV_ATTACK_COEFF  13107  // ~1ms attack (at core 1's ~5kHz loop rate)
-#define SC_ENV_RELEASE_COEFF 131    // ~100ms release (slow pump)
+#define SC_ENV_ATTACK_COEFF  1351   // ~1ms attack (at 48kHz — core 1 synced to sample rate)
+#define SC_ENV_RELEASE_COEFF 14     // ~100ms release (slow pump)
 
 // Gain smoother coefficient (48kHz, ~1ms time constant)
 #define GAIN_SMOOTH_COEFF   400
@@ -522,6 +522,7 @@ struct SharedSidechain {
     volatile int32_t dry_mono;              // Core 0 writes, core 1 reads
     volatile int32_t duck_gain[NUM_BANDS];  // Core 1 writes, core 0 reads (Q10)
     volatile bool    bypass;                // Core 0 writes, core 1 reads
+    volatile uint32_t sample_tick;          // Core 0 increments, core 1 waits for change
 };
 
 // Sidechain state — owned exclusively by core 1
@@ -577,6 +578,7 @@ static void multiband_init(MultibandState *mb)
     }
     mb->shared.dry_mono = 0;
     mb->shared.bypass = false;
+    mb->shared.sample_tick = 0;
     mb->decimCounter = 0;
 
     // Precompute inverse thresholds to avoid division in the ISR
@@ -643,8 +645,10 @@ static inline void __not_in_flash_func(multiband_update_gains)(
 // runs envelope followers, computes per-band ducking gain, and writes
 // results back to shared volatiles for core 0 to apply.
 //
-// Core 1 has no other responsibilities — it just loops as fast as it can.
-// At ~5kHz effective rate the envelope followers track transients well.
+// Core 1 waits for core 0 to write a new sample (via sample_tick),
+// then processes it. This naturally syncs core 1 to 48kHz — one
+// iteration per audio sample. The envelope follower coefficients
+// are tuned for this rate.
 
 // Global pointer so the static core 1 entry can find the MultibandState
 static MultibandState *g_mb_ptr = nullptr;
@@ -653,16 +657,20 @@ static void __not_in_flash_func(core1_sidechain_loop)()
 {
     MultibandState *mb = g_mb_ptr;
     SidechainState *sc = &mb->sc;
+    uint32_t last_tick = 0;
 
     while (true)
     {
-        // If compressor is bypassed, write unity gains and idle
+        // Wait for core 0 to provide a new sample
+        uint32_t tick = mb->shared.sample_tick;
+        if (tick == last_tick) continue;
+        last_tick = tick;
+
+        // If compressor is bypassed, write unity gains
         if (mb->shared.bypass)
         {
             for (int i = 0; i < NUM_BANDS; i++)
                 mb->shared.duck_gain[i] = 1024;
-            // Busy-wait briefly to avoid hammering the bus
-            for (volatile int d = 0; d < 1000; d++) {}
             continue;
         }
 
@@ -1340,6 +1348,7 @@ public:
 
         // Share dry input with core 1 for sidechain detection
         mb.shared.dry_mono = monoIn;
+        mb.shared.sample_tick++;
 
         // ---- Input high-pass filter @ ~80Hz ----
         // Removes sub-bass rumble before the delay to prevent muddy
