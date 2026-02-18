@@ -28,6 +28,7 @@ target_include_directories(robodub PUBLIC
 target_link_libraries(robodub
     pico_unique_id
     pico_stdlib
+    pico_multicore
     hardware_dma
     hardware_i2c
     hardware_pwm

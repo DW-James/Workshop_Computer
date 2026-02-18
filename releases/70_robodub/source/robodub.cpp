@@ -55,7 +55,7 @@
 
 #include "ComputerCard.h"
 #include "pico/stdlib.h"
-// multicore removed — everything runs on core 0 for simplicity
+#include "pico/multicore.h"
 #include "hardware/clocks.h"
 #include <cmath>    // for sinf() — used at startup only, never in ISR
 
@@ -156,6 +156,8 @@ static inline int32_t __not_in_flash_func(filter_hp)(OnePole *f, int32_t b, int3
     f->state += (((input - f->state) * b + 32768) >> 16);
     return input - f->state;
 }
+
+
 
 
 // ============================================================================
@@ -598,6 +600,77 @@ static inline void __not_in_flash_func(multiband_update_gains)(
 
 
 // ============================================================================
+// Sidechain ducking (spectral, runs on core 1)
+// ============================================================================
+// Core 1 reads the dry input and wet output (via shared volatiles), splits
+// the dry signal into 8 bands, and computes per-band ducking gains.
+// Core 0 applies these gains alongside the compressor gains.
+//
+// Key design decisions to avoid previous bugs:
+//  - Core 1 waits for a "ready" flag before processing (startup wait)
+//  - Core 1 sleeps with __wfe() instead of hot spin loops (no bus contention)
+//  - Core 0 wakes core 1 with __sev() after writing new samples
+//  - Decimated: core 1 only processes every SC_DECIM ticks (~4.8kHz)
+
+// Sidechain parameters
+#define SC_DECIM            10      // Process every 10th sample (~4.8kHz)
+
+// Per-band sidechain ducking parameters.
+// Follows professional multiband sidechain norms (TC Finalizer, Trackspacer):
+//  - Bass: higher threshold (more energy), deeper duck, slower attack/release
+//  - Mids: moderate all round
+//  - Highs: lower threshold (less energy but more sensitive), lighter duck, faster timing
+//
+// Attack/release coefficients are for ~4.8kHz update rate.
+// Coefficient formula: coeff = 65536 * (1 - exp(-1000 / (time_ms * 4800)))
+// inv_range = (1<<16) / range — precomputed to avoid division on M0+
+struct BandDuckParams {
+    int32_t threshold;      // Dry envelope must exceed this to start ducking
+    int32_t depth;          // Max ducking in Q10 (614 ≈ -4dB, 820 ≈ -8dB)
+    int32_t inv_range;      // (1<<16) / range — controls how fast ducking ramps up
+    int32_t attack_coeff;   // Envelope attack (higher = faster)
+    int32_t release_coeff;  // Envelope release (higher = faster)
+};
+
+static const BandDuckParams duck_params[NUM_BANDS] = {
+    //  thresh  depth   inv_range   attack      release
+    //                  (range)     (time)      (time)
+    { 200,      820,    109,        910,        66  },  // <100Hz:     high thresh, -8dB deep, 75ms attack, 200ms release
+    { 180,      768,    131,        1820,       87  },  // 100-250Hz:  -6.5dB, 40ms attack, 150ms release
+    { 160,      716,    146,        3547,       109 },  // 250-600Hz:  -5.5dB, 20ms attack, 120ms release
+    { 150,      665,    164,        6400,       131 },  // 600-1.5kHz: -5dB, 10ms attack, 100ms release
+    { 100,      716,    197,        9600,       87  },  // 1.5-3.5kHz: -5.5dB, 7ms attack, 150ms release
+    { 80,       716,    218,        13107,      87  },  // 3.5-7kHz:   -5.5dB, 5ms attack, 150ms release
+    { 70,       665,    256,        19200,      87  },  // 7-12kHz:    -5dB, 3.5ms attack, 150ms release
+    { 60,       614,    327,        26214,      87  },  // 12kHz+:     -4dB, 2.5ms attack, 150ms release
+};
+
+// Shared state between core 0 (ISR) and core 1 (sidechain loop).
+// All fields are volatile for lock-free inter-core communication.
+// On M0+ (Cortex-M0+), aligned 32-bit reads/writes are atomic.
+struct SharedSidechain {
+    volatile int32_t dry_mono;          // Written by core 0
+    volatile int32_t duck_gain[NUM_BANDS]; // Written by core 1, read by core 0 (Q10)
+    volatile uint32_t sample_tick;      // Incremented by core 0 each sample
+    volatile bool ready;                // Set by core 0 after startup mute completes
+};
+
+// Core 1's private state (not shared — only core 1 touches this)
+struct SidechainState {
+    BandFilters dry_filters;            // 7 crossover filters for dry signal
+    int32_t dry_env[NUM_BANDS];         // Per-band envelope followers
+    uint32_t last_tick;                 // Last processed tick
+};
+
+// Forward declaration — the actual loop is defined after the class
+static void core1_sidechain_entry();
+
+// Global pointer so core 1's static entry point can reach the shared state.
+// Set before multicore_launch_core1() is called.
+static volatile SharedSidechain *g_sidechain = nullptr;
+
+
+// ============================================================================
 // Clock / tempo detection
 // ============================================================================
 // Pulse In 1 = quarter-note clock.
@@ -1024,6 +1097,7 @@ class Robodub : public ComputerCard
     // --- Feedback filters (per channel) ---
     OnePole feedbackLPF_L, feedbackLPF_R;   // HF damping (tape darkening)
     OnePole dcBlockL, dcBlockR;              // DC blocker (prevents runaway)
+    OnePole notchLP_L, notchLP_R;           // ~1200Hz resonance dip (feedback tamer)
 
     // --- Tape wow (simple sine modulation of delay read position) ---
     // Each channel gets its own slow sine LFO at a different rate,
@@ -1086,8 +1160,11 @@ class Robodub : public ComputerCard
     uint32_t sampleTrigFlash;   // Counts down after sample trigger for LED 3
     uint32_t clipHold;          // Clipping indicator hold counter for LED 0
 
-    // --- Multiband compressor + sidechain ducking (decimated on core 0) ---
+    // --- Multiband compressor (decimated on core 0) ---
     MultibandState mb;
+
+    // --- Sidechain ducking (core 1) ---
+    SharedSidechain sidechain;
 
 public:
     Robodub()
@@ -1103,6 +1180,8 @@ public:
         filter_init(&feedbackLPF_R);
         filter_init(&dcBlockL);
         filter_init(&dcBlockR);
+        filter_init(&notchLP_L);
+        filter_init(&notchLP_R);
         ringmod_phase = 0;
 
         // Tape wow: two slow sine LFOs at different rates modulate
@@ -1147,8 +1226,18 @@ public:
         sampleTrigFlash = 0;
         clipHold = 0;
 
-        // Multiband compressor + sidechain ducking (decimated on core 0)
+        // Multiband compressor (decimated on core 0)
         multiband_init(&mb);
+
+        // Sidechain ducking — init shared state, launch core 1
+        sidechain.dry_mono = 0;
+        sidechain.sample_tick = 0;
+        sidechain.ready = false;  // Core 1 waits until startup mute completes
+        for (int i = 0; i < NUM_BANDS; i++)
+            sidechain.duck_gain[i] = 1024;  // Unity (no ducking) until core 1 starts
+
+        g_sidechain = &sidechain;
+        multicore_launch_core1(core1_sidechain_entry);
 
         EnableNormalisationProbe();
     }
@@ -1161,7 +1250,9 @@ public:
     {
         // ---- Startup mute (2 seconds) ----
         // Prevents thump from DC settling and filter initialisation.
+        // Also gates core 1 sidechain — it waits for 'ready' before processing.
         if (startupCounter < 96000) { startupCounter++; AudioOut1(0); AudioOut2(0); return; }
+        if (!sidechain.ready) sidechain.ready = true;  // Signal core 1: audio is up
 
         // ---- Read controls ----
         int32_t mainKnob  = KnobVal(Knob::Main);   // Feedback amount
@@ -1222,6 +1313,11 @@ public:
         int32_t inL = AudioIn1();
         int32_t inR = AudioIn2();
         int32_t monoIn = (inL + inR) >> 1;
+
+        // Write dry input to shared state for core 1 sidechain, then wake it
+        sidechain.dry_mono = monoIn;
+        sidechain.sample_tick++;
+        __sev();  // Wake core 1 from __wfe() sleep — zero cost if already awake
 
         // ---- Input high-pass filter @ ~80Hz ----
         // Removes sub-bass rumble before the delay to prevent muddy
@@ -1511,6 +1607,20 @@ public:
         feedbackL = filter_hp(&dcBlockL, 1022, feedbackL);
         feedbackR = filter_hp(&dcBlockR, 1022, feedbackR);
 
+        // Mid-scoop at ~1200Hz tames a resonant peak caused by
+        // cumulative phase shift from the LP+HP filters over many
+        // feedback passes. The geometric mean of 120Hz and 12kHz
+        // is ~1200Hz — right where the ringing sits.
+        // Method: LP extract at 1200Hz, subtract ~25% of it.
+        // This gives a broad -2.5dB dip centred on the resonance.
+        // Coefficient 9886 ≈ 1200Hz at 48kHz.
+        {
+            int32_t midL = filter_lp(&notchLP_L, 9886, feedbackL);
+            int32_t midR = filter_lp(&notchLP_R, 9886, feedbackR);
+            feedbackL -= midL >> 2;
+            feedbackR -= midR >> 2;
+        }
+
         // Hard clamp to DAC range before writing back to delay
         feedbackL = clamp(feedbackL, -2047, 2047);
         feedbackR = clamp(feedbackR, -2047, 2047);
@@ -1686,6 +1796,7 @@ public:
         // Split wet stereo into 8 bands, apply per-band gain, recombine.
         // Serial subtraction: band[i] = LP(residual), residual -= band[i].
         // All bands sum back to exactly the original signal at unity gain.
+        // Combined gain = compressor gain × sidechain duck gain (both Q10).
         {
             int32_t finalL = 0, finalR = 0;
             int32_t residualL = outL;
@@ -1700,17 +1811,25 @@ public:
                 residualL -= bandL;
                 residualR -= bandR;
 
-                // Smooth the gain to prevent zipper noise (~1ms)
+                // Combine compressor + sidechain gains (both Q10, multiply → Q20, shift back)
+                int32_t comp_g = mb.band_gain[i];
+                int32_t duck_g = sidechain.duck_gain[i];
+                int32_t combined = (comp_g * duck_g) >> 10;
+
+                // Smooth the combined gain to prevent zipper noise (~1ms)
                 int32_t g = filter_lp(&mb.gain_smooth[i], GAIN_SMOOTH_COEFF,
-                                       mb.band_gain[i]);
+                                       combined);
                 finalL += (bandL * g) >> 10;
                 finalR += (bandR * g) >> 10;
             }
             // Last band = residual (everything above 12kHz)
             {
+                int32_t comp_g = mb.band_gain[NUM_CROSSOVERS];
+                int32_t duck_g = sidechain.duck_gain[NUM_CROSSOVERS];
+                int32_t combined = (comp_g * duck_g) >> 10;
                 int32_t g = filter_lp(&mb.gain_smooth[NUM_CROSSOVERS],
                                        GAIN_SMOOTH_COEFF,
-                                       mb.band_gain[NUM_CROSSOVERS]);
+                                       combined);
                 finalL += (residualL * g) >> 10;
                 finalR += (residualR * g) >> 10;
             }
@@ -1855,6 +1974,106 @@ public:
         }
     }
 };
+
+
+// ============================================================================
+// Core 1: Sidechain ducking loop
+// ============================================================================
+// Runs on the second RP2040 core. Reads dry input from shared volatiles,
+// splits into 8 frequency bands, computes per-band envelope followers,
+// and writes duck_gain values back to shared state for core 0 to apply.
+//
+// Startup safety: waits for core 0's 2-second startup mute to complete
+// before processing any audio. This prevents noise from uninitialised
+// filters/buffers being interpreted as envelope data.
+//
+// Sleep strategy: uses __wfe() (ARM wait-for-event) to sleep between
+// processing cycles. Core 0 sends __sev() after each new sample.
+// This means core 1 generates ZERO bus traffic while sleeping, unlike
+// a spin-wait loop on a volatile that constantly reads SRAM.
+
+static void core1_sidechain_entry()
+{
+    volatile SharedSidechain *sc = g_sidechain;
+    SidechainState state;
+
+    // Init core 1's private filter/envelope state
+    for (int i = 0; i < NUM_CROSSOVERS; i++)
+        filter_init(&state.dry_filters.crossover[i]);
+    for (int i = 0; i < NUM_BANDS; i++)
+        state.dry_env[i] = 0;
+    state.last_tick = 0;
+
+    // ---- STARTUP WAIT ----
+    // Sleep until core 0 signals that audio is fully initialised.
+    // This is the fix for the startup noise — core 1 does nothing
+    // until the 2-second mute is over and real audio is flowing.
+    while (!sc->ready)
+        __wfe();
+
+    // Drain any pending SEV events accumulated during startup mute
+    __sev();  // Set event flag so next __wfe() doesn't block
+    __wfe();  // Consume it immediately
+
+    state.last_tick = sc->sample_tick;
+
+    // ---- MAIN PROCESSING LOOP ----
+    for (;;)
+    {
+        // Sleep until core 0 wakes us with __sev()
+        __wfe();
+
+        // Check if enough samples have elapsed for decimated processing
+        uint32_t tick = sc->sample_tick;
+        uint32_t elapsed = tick - state.last_tick;
+        if (elapsed < SC_DECIM) continue;
+        state.last_tick = tick;
+
+        // Read dry mono from shared state
+        int32_t dry_mono = sc->dry_mono;
+
+        // Split dry signal into 8 frequency bands
+        int32_t dry_bands[NUM_BANDS];
+        int32_t residual = dry_mono;
+        for (int i = 0; i < NUM_CROSSOVERS; i++)
+        {
+            dry_bands[i] = filter_lp(&state.dry_filters.crossover[i],
+                                      crossover_coeffs[i], residual);
+            residual -= dry_bands[i];
+        }
+        dry_bands[NUM_CROSSOVERS] = residual;
+
+        // Per-band envelope follower + ducking gain computation.
+        // Each band has its own threshold, depth, and attack/release —
+        // bass ducks deep and slow, highs duck light and fast.
+        for (int i = 0; i < NUM_BANDS; i++)
+        {
+            const BandDuckParams *p = &duck_params[i];
+
+            // Envelope follower on dry signal (per-band attack/release)
+            int32_t dry_abs = dry_bands[i] < 0 ? -dry_bands[i] : dry_bands[i];
+            if (dry_abs > state.dry_env[i])
+                state.dry_env[i] += ((dry_abs - state.dry_env[i])
+                                     * p->attack_coeff + 32768) >> 16;
+            else
+                state.dry_env[i] += ((dry_abs - state.dry_env[i])
+                                     * p->release_coeff + 32768) >> 16;
+
+            // Ducking: if dry envelope > threshold, reduce gain proportionally
+            int32_t env = state.dry_env[i];
+            int32_t duck = 1024;  // Unity (no ducking)
+            if (env > p->threshold)
+            {
+                int32_t excess = env - p->threshold;
+                int32_t reduction = (excess * p->inv_range) >> 16;
+                if (reduction > p->depth) reduction = p->depth;
+                duck = 1024 - reduction;
+                if (duck < (1024 - p->depth)) duck = 1024 - p->depth;
+            }
+            sc->duck_gain[i] = duck;
+        }
+    }
+}
 
 
 // ============================================================================
