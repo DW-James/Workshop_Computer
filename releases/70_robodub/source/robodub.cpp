@@ -1718,8 +1718,10 @@ public:
             // Real external clock overrides tap tempo
             tapTempoLocked = false;
 
-            // Accept clock periods between ~150ms and ~1.5s (40-400 BPM)
-            if (clockCounter > 14400 && clockCounter < 72000)
+            // Accept clock periods between ~75ms and ~2s.
+            // At 1ppqn: 30-640 BPM range. At 2ppqn: 15-320 BPM range.
+            // Wide enough for fast clock divisions (2ppqn, 4ppqn) and slow tempos.
+            if (clockCounter > 3600 && clockCounter < 96000)
             {
                 clockPeriod = clockCounter;
                 clockSynced = true;
@@ -1745,8 +1747,13 @@ public:
 
         if (clockSynced)
         {
-            // Dotted eighth = 3/8 of quarter note period
-            int32_t newDelay = (int32_t)((clockPeriod * 3) >> 3);
+            // Find the longest multiple of the clock period whose dotted-eighth
+            // fits in the delay buffer. This handles any ppqn (1, 2, 4, etc.)
+            // automatically — fast clock divisions get doubled up until the
+            // delay time fills the buffer as much as possible.
+            uint32_t period = clockPeriod;
+            while ((((period << 1) * 3) >> 3) <= MAX_DELAY_SAMPLES) period <<= 1;
+            int32_t newDelay = (int32_t)((period * 3) >> 3);
             newDelay = clamp(newDelay, MIN_DELAY_SAMPLES, MAX_DELAY_SAMPLES);
             // Smooth towards target (1/256 per sample ≈ 5ms convergence)
             delayTimeSamples += (newDelay - (int32_t)delayTimeSamples + 128) >> 8;
