@@ -1097,8 +1097,10 @@ class Robodub : public ComputerCard
     // --- Feedback filters (per channel) ---
     OnePole feedbackLPF_L, feedbackLPF_R;   // HF damping (tape darkening)
     OnePole dcBlockL, dcBlockR;              // DC blocker (prevents runaway)
-    OnePole dipHi_L, dipHi_R;               // ~1500Hz LP (upper edge of dip band)
-    OnePole dipLo_L, dipLo_R;               // ~900Hz LP (lower edge of dip band)
+    OnePole dipHi_L, dipHi_R;               // ~1400Hz LP (upper edge of dip 1)
+    OnePole dipLo_L, dipLo_R;               // ~1050Hz LP (lower edge of dip 1)
+    OnePole dip2Hi_L, dip2Hi_R;             // ~2700Hz LP (upper edge of dip 2)
+    OnePole dip2Lo_L, dip2Lo_R;             // ~2100Hz LP (lower edge of dip 2)
 
     // --- Tape wow (simple sine modulation of delay read position) ---
     // Each channel gets its own slow sine LFO at a different rate,
@@ -1185,6 +1187,10 @@ public:
         filter_init(&dipHi_R);
         filter_init(&dipLo_L);
         filter_init(&dipLo_R);
+        filter_init(&dip2Hi_L);
+        filter_init(&dip2Hi_R);
+        filter_init(&dip2Lo_L);
+        filter_init(&dip2Lo_R);
         ringmod_phase = 0;
 
         // Tape wow: two slow sine LFOs at different rates modulate
@@ -1622,6 +1628,19 @@ public:
 
             int32_t hiR = filter_lp(&dipHi_R, 11277, feedbackR);
             int32_t loR = filter_lp(&dipLo_R, 8498, feedbackR);
+            feedbackR -= ((hiR - loR) * 225) >> 10;
+        }
+
+        // Second harmonic dip at ~2360Hz — same phase-shift resonance
+        // one octave up. Bandpass = LP@2700Hz minus LP@2100Hz, ~22%.
+        // Coefficients: 20525 ≈ 2700Hz, 16277 ≈ 2100Hz at 48kHz.
+        {
+            int32_t hiL = filter_lp(&dip2Hi_L, 20525, feedbackL);
+            int32_t loL = filter_lp(&dip2Lo_L, 16277, feedbackL);
+            feedbackL -= ((hiL - loL) * 225) >> 10;
+
+            int32_t hiR = filter_lp(&dip2Hi_R, 20525, feedbackR);
+            int32_t loR = filter_lp(&dip2Lo_R, 16277, feedbackR);
             feedbackR -= ((hiR - loR) * 225) >> 10;
         }
 
