@@ -1713,20 +1713,31 @@ public:
                 // The dry signal fades gently while ring mod comes in,
                 // keeping the delay tone always present underneath.
                 //
-                // Dry/wet curves designed so the middle of Y is fattest:
+                // At low carrier frequencies (tremolo range), the ring mod
+                // wet signal averages near zero because the sine carrier
+                // crosses through zero regularly. So dry must stay high
+                // in the first half to avoid a volume dip in the middle.
+                //
+                // Dry/wet curves:
                 //   Y   0%: dry 100%, wet  0%  = 100% total
-                //   Y  50%: dry  70%, wet 45%  = 115% total (sweet spot)
+                //   Y  25%: dry  95%, wet 30%  = 125% total (tremolo zone)
+                //   Y  50%: dry  80%, wet 45%  = 125% total (sweet spot)
                 //   Y 100%: dry  40%, wet 60%  = 100% total
                 //
-                // Dry ramps linearly 100%→40%. Wet uses a bulging curve
-                // (piecewise linear: ramps fast to 45% at halfway, then
-                // slower to 60% at full). This gives the boost in the
-                // middle where the ring mod is most musical.
+                // Dry: piecewise — stays high in first half, ducks in second.
+                // Wet: piecewise — fast ramp to 45% at midpoint, then
+                // gentle climb to 60% at full.
                 int32_t yNorm = ((yKnob - 100) * 4096) / 3995;  // 0–4096
                 if (yNorm > 4096) yNorm = 4096;
 
-                // Dry: linear 4096 → 1638 (100% → 40%)
-                int32_t dryMix = 4096 - ((yNorm * 2458) >> 12);
+                // Dry: piecewise — gentle duck first half, steeper second.
+                //   First half:  4096 → 3277 (100% → 80%)
+                //   Second half: 3277 → 1638 (80% → 40%)
+                int32_t dryMix;
+                if (yNorm < 2048)
+                    dryMix = 4096 - ((yNorm * 819) >> 11);   // 100%→80%
+                else
+                    dryMix = 3277 - (((yNorm - 2048) * 1639) >> 11);  // 80%→40%
 
                 // Wet: piecewise — fast ramp to 45% at midpoint, then
                 // gentle climb to 60% at full Y.
