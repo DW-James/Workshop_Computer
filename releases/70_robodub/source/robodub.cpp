@@ -55,6 +55,7 @@
 
 #include "ComputerCard.h"
 #include "pico/stdlib.h"
+#include "pico/multicore.h"
 #include "hardware/clocks.h"
 #include <cmath>    // for sinf() — used at startup only, never in ISR
 
@@ -435,6 +436,233 @@ static inline int32_t __not_in_flash_func(get_feedback)(int32_t knob)
     int32_t v0 = feedback_curve_lut[index];
     int32_t v1 = feedback_curve_lut[index + 1];
     return v0 + (((v1 - v0) * frac) >> 12);
+}
+
+
+// ============================================================================
+// 8-band multiband compressor + sidechain ducking (runs on core 1)
+// ============================================================================
+// Splits the stereo output into 8 frequency bands and applies per-band
+// gain control for two purposes:
+//
+// 1. COMPRESSION: Tames peaks in each band independently, bringing up
+//    quiet textural detail (shimmer, ring mod harmonics) while preventing
+//    bass buildup and feedback bloom from dominating.
+//
+// 2. SIDECHAIN DUCKING (Trackspacer-style): The dry input is split into
+//    the same 8 bands. Where the dry signal has energy, the corresponding
+//    wet band ducks — so a kick only clears the delay's bass, vocals only
+//    clear the mids, etc. The delay fills back in between notes.
+//
+// Architecture: Core 1 computes 8 gain values at ~5kHz (slow but smooth).
+// Core 0 splits audio into bands, applies gains, and recombines at 48kHz.
+
+#define NUM_BANDS       8
+#define NUM_CROSSOVERS  7
+
+// Crossover filter coefficients for the 7 split points.
+// Computed from: b = 65536 * (1 - exp(-2*pi*fc/48000))
+static const int32_t crossover_coeffs[NUM_CROSSOVERS] = {
+    849,    // 100 Hz
+    2109,   // 250 Hz
+    4977,   // 600 Hz
+    11914,  // 1500 Hz
+    25471,  // 3500 Hz
+    43534,  // 7000 Hz
+    58927   // 12000 Hz
+};
+
+// Per-band compression parameters (fixed, tuned for delay output)
+// Lower bands: higher threshold (bass has more energy), gentler ratio
+// Upper bands: lower threshold (bring up shimmer detail), stronger ratio
+struct BandCompParams {
+    int32_t threshold;      // Absolute value, 12-bit scale (0-2047)
+    int32_t ratio_recip;    // 1/ratio in Q10 (1024=1:1, 512=2:1, 341=3:1)
+    int32_t makeup_gain;    // Makeup gain in Q10 (1024=unity)
+    int32_t inv_threshold;  // Precomputed (1<<16)/threshold — avoids ISR division
+};
+
+static BandCompParams comp_params[NUM_BANDS] = {
+    // threshold, ratio_recip, makeup_gain, inv_threshold (filled at init)
+    { 800, 683, 1126, 0 },   // <100Hz:     1.5:1, +0.8dB makeup
+    { 700, 683, 1178, 0 },   // 100-250Hz:  1.5:1, +1.2dB
+    { 500, 512, 1229, 0 },   // 250-600Hz:  2:1,   +1.6dB
+    { 400, 512, 1280, 0 },   // 600-1.5kHz: 2:1,   +2.0dB
+    { 300, 410, 1382, 0 },   // 1.5-3.5kHz: 2.5:1, +2.6dB
+    { 250, 410, 1434, 0 },   // 3.5-7kHz:   2.5:1, +3.0dB
+    { 200, 341, 1536, 0 },   // 7-12kHz:    3:1,   +3.5dB
+    { 150, 341, 1638, 0 },   // 12kHz+:     3:1,   +4.1dB
+};
+
+// Sidechain ducking parameters
+#define SC_DUCK_DEPTH     614   // Max ducking in Q10 (~-4dB)
+#define SC_DUCK_THRESHOLD 100   // Sidechain level to start ducking
+#define SC_DUCK_RANGE     600   // Range over which ducking goes 0→full
+
+// Envelope follower coefficients (tuned for core 1 at ~5kHz update rate)
+#define ENV_ATTACK_COEFF    13107  // ~1ms attack
+#define ENV_RELEASE_COEFF   262    // ~50ms release
+#define SC_ENV_ATTACK_COEFF 13107  // ~1ms attack
+#define SC_ENV_RELEASE_COEFF 524   // ~25ms release
+
+// Gain smoother coefficient for core 0 (48kHz, ~1ms time constant)
+#define GAIN_SMOOTH_COEFF   400
+
+// Per-channel filterbank state (7 OnePole filters for serial subtraction)
+struct BandFilters {
+    OnePole crossover[NUM_CROSSOVERS];
+};
+
+// Complete multiband processor shared state
+struct MultibandState {
+    // Band splitting filters — core 0 (per-sample audio path)
+    BandFilters wet_filters_L;
+    BandFilters wet_filters_R;
+
+    // Sidechain + wet envelope filters — core 1 only
+    BandFilters sidechain_filters;
+    BandFilters wet_env_filters;     // For splitting wet mono on core 1
+
+    // Envelope followers — core 1 only
+    int32_t sc_env[NUM_BANDS];       // Sidechain per-band envelope
+    int32_t wet_env[NUM_BANDS];      // Wet signal per-band envelope
+
+    // Per-band gain (written by core 1, read by core 0)
+    volatile int32_t band_gain[NUM_BANDS];  // Q10: 1024 = unity
+
+    // Gain smoothers — core 0 only (anti-zipper)
+    OnePole gain_smooth[NUM_BANDS];
+
+    // Shared samples (written by core 0, read by core 1)
+    volatile int16_t shared_monoIn;  // Dry input (sidechain source)
+    volatile int16_t shared_wetL;    // Wet stereo output
+    volatile int16_t shared_wetR;
+
+    // Timing reference
+    volatile uint32_t sampleCount;
+};
+
+// Initialise all multiband state
+static void multiband_init(MultibandState *mb)
+{
+    for (int i = 0; i < NUM_CROSSOVERS; i++)
+    {
+        filter_init(&mb->wet_filters_L.crossover[i]);
+        filter_init(&mb->wet_filters_R.crossover[i]);
+        filter_init(&mb->sidechain_filters.crossover[i]);
+        filter_init(&mb->wet_env_filters.crossover[i]);
+    }
+    for (int i = 0; i < NUM_BANDS; i++)
+    {
+        mb->sc_env[i] = 0;
+        mb->wet_env[i] = 0;
+        mb->band_gain[i] = 1024;  // Start at unity
+        filter_init(&mb->gain_smooth[i]);
+        mb->gain_smooth[i].state = 1024;  // Pre-fill smoother at unity
+    }
+    mb->shared_monoIn = 0;
+    mb->shared_wetL = 0;
+    mb->shared_wetR = 0;
+    mb->sampleCount = 0;
+
+    // Precompute inverse thresholds to avoid division in the ISR
+    for (int i = 0; i < NUM_BANDS; i++)
+        comp_params[i].inv_threshold = (1 << 16) / comp_params[i].threshold;
+}
+
+// Core 1 processing loop — computes per-band gain values
+static void __not_in_flash_func(core1_multiband_loop)(MultibandState *mb)
+{
+    while (1)
+    {
+        // Read latest shared samples
+        int32_t sc_in = (int32_t)mb->shared_monoIn;
+        int32_t wet_l = (int32_t)mb->shared_wetL;
+        int32_t wet_r = (int32_t)mb->shared_wetR;
+        int32_t wet_mono = (wet_l + wet_r) >> 1;
+
+        // Split sidechain (dry input) into 8 bands
+        int32_t sc_bands[NUM_BANDS];
+        int32_t sc_residual = sc_in;
+        for (int i = 0; i < NUM_CROSSOVERS; i++)
+        {
+            sc_bands[i] = filter_lp(&mb->sidechain_filters.crossover[i],
+                                     crossover_coeffs[i], sc_residual);
+            sc_residual -= sc_bands[i];
+        }
+        sc_bands[NUM_CROSSOVERS] = sc_residual;
+
+        // Split wet mono into 8 bands (for compression envelope)
+        int32_t wet_bands[NUM_BANDS];
+        int32_t wet_residual = wet_mono;
+        for (int i = 0; i < NUM_CROSSOVERS; i++)
+        {
+            wet_bands[i] = filter_lp(&mb->wet_env_filters.crossover[i],
+                                      crossover_coeffs[i], wet_residual);
+            wet_residual -= wet_bands[i];
+        }
+        wet_bands[NUM_CROSSOVERS] = wet_residual;
+
+        // Compute per-band gains
+        for (int i = 0; i < NUM_BANDS; i++)
+        {
+            // ---- Wet signal envelope (for compression) ----
+            int32_t wet_abs = wet_bands[i] < 0 ? -wet_bands[i] : wet_bands[i];
+            if (wet_abs > mb->wet_env[i])
+                mb->wet_env[i] += ((wet_abs - mb->wet_env[i])
+                                   * ENV_ATTACK_COEFF + 32768) >> 16;
+            else
+                mb->wet_env[i] += ((wet_abs - mb->wet_env[i])
+                                   * ENV_RELEASE_COEFF + 32768) >> 16;
+
+            // ---- Compression gain ----
+            int32_t comp_gain = 1024;
+            int32_t env = mb->wet_env[i];
+            int32_t thresh = comp_params[i].threshold;
+            if (env > thresh)
+            {
+                int32_t excess = env - thresh;
+                // Gain reduction = (1 - 1/ratio) * excess / threshold
+                // Using precomputed inv_threshold to avoid division
+                int32_t reduction_factor = 1024 - comp_params[i].ratio_recip;
+                int32_t reduction = (reduction_factor * ((excess * comp_params[i].inv_threshold) >> 8)) >> 8;
+                comp_gain = 1024 - reduction;
+                if (comp_gain < 128) comp_gain = 128;  // Floor at -18dB
+            }
+
+            // ---- Sidechain envelope (for ducking) ----
+            int32_t sc_abs = sc_bands[i] < 0 ? -sc_bands[i] : sc_bands[i];
+            if (sc_abs > mb->sc_env[i])
+                mb->sc_env[i] += ((sc_abs - mb->sc_env[i])
+                                  * SC_ENV_ATTACK_COEFF + 32768) >> 16;
+            else
+                mb->sc_env[i] += ((sc_abs - mb->sc_env[i])
+                                  * SC_ENV_RELEASE_COEFF + 32768) >> 16;
+
+            // ---- Sidechain ducking gain ----
+            int32_t duck_gain = 1024;
+            int32_t sc_level = mb->sc_env[i];
+            if (sc_level > SC_DUCK_THRESHOLD)
+            {
+                int32_t duck_amount = ((sc_level - SC_DUCK_THRESHOLD)
+                                       * SC_DUCK_DEPTH) / SC_DUCK_RANGE;
+                if (duck_amount > SC_DUCK_DEPTH) duck_amount = SC_DUCK_DEPTH;
+                duck_gain = 1024 - duck_amount;
+            }
+
+            // ---- Combine compression + ducking + makeup ----
+            int32_t final_gain = (comp_gain * duck_gain) >> 10;
+            final_gain = (final_gain * comp_params[i].makeup_gain) >> 10;
+            if (final_gain > 2048) final_gain = 2048;  // Cap at +6dB
+            if (final_gain < 0) final_gain = 0;
+
+            mb->band_gain[i] = final_gain;
+        }
+
+        // Track timing
+        uint32_t passed = mb->sampleCount;
+        mb->sampleCount -= passed;
+    }
 }
 
 
@@ -927,6 +1155,16 @@ class Robodub : public ComputerCard
     uint32_t sampleTrigFlash;   // Counts down after sample trigger for LED 3
     uint32_t clipHold;          // Clipping indicator hold counter for LED 0
 
+    // --- Multiband compressor + sidechain ducking (core 1) ---
+    MultibandState mb;
+
+    // Core 1 entry point — static trampoline to member data
+    static void core1_entry()
+    {
+        Robodub *self = (Robodub *)ThisPtr();
+        core1_multiband_loop(&self->mb);
+    }
+
 public:
     Robodub()
     {
@@ -984,6 +1222,10 @@ public:
         playbackEnvelope = 0;
         sampleTrigFlash = 0;
         clipHold = 0;
+
+        // Multiband compressor + sidechain ducking (runs on core 1)
+        multiband_init(&mb);
+        multicore_launch_core1(core1_entry);
 
         EnableNormalisationProbe();
     }
@@ -1495,6 +1737,49 @@ public:
                 outL = ((outL * dryMix) >> 12) + ((wetL * ringAmount) >> 12);
                 outR = ((outR * dryMix) >> 12) + ((wetR * ringAmount) >> 12);
             }
+        }
+
+        // ---- 8-band multiband compressor + sidechain ducking ----
+        // Write shared samples for core 1 (sidechain + wet signal)
+        mb.shared_monoIn = (int16_t)monoIn;
+        mb.shared_wetL = (int16_t)clamp(outL, -2047, 2047);
+        mb.shared_wetR = (int16_t)clamp(outR, -2047, 2047);
+        mb.sampleCount++;
+
+        // Split wet stereo into 8 bands, apply per-band gain, recombine.
+        // Serial subtraction: band[i] = LP(residual), residual -= band[i].
+        // All bands sum back to exactly the original signal at unity gain.
+        {
+            int32_t finalL = 0, finalR = 0;
+            int32_t residualL = outL;
+            int32_t residualR = outR;
+
+            for (int i = 0; i < NUM_CROSSOVERS; i++)
+            {
+                int32_t bandL = filter_lp(&mb.wet_filters_L.crossover[i],
+                                           crossover_coeffs[i], residualL);
+                int32_t bandR = filter_lp(&mb.wet_filters_R.crossover[i],
+                                           crossover_coeffs[i], residualR);
+                residualL -= bandL;
+                residualR -= bandR;
+
+                // Smooth the gain to prevent zipper noise (~1ms)
+                int32_t g = filter_lp(&mb.gain_smooth[i], GAIN_SMOOTH_COEFF,
+                                       mb.band_gain[i]);
+                finalL += (bandL * g) >> 10;
+                finalR += (bandR * g) >> 10;
+            }
+            // Last band = residual (everything above 12kHz)
+            {
+                int32_t g = filter_lp(&mb.gain_smooth[NUM_CROSSOVERS],
+                                       GAIN_SMOOTH_COEFF,
+                                       mb.band_gain[NUM_CROSSOVERS]);
+                finalL += (residualL * g) >> 10;
+                finalR += (residualR * g) >> 10;
+            }
+
+            outL = finalL;
+            outR = finalR;
         }
 
         AudioOut1((int16_t)clamp(outL, -2047, 2047));
