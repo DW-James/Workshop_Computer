@@ -2531,10 +2531,10 @@ public:
                 // clockCounter < 2400 gives a ~50ms flash per beat.
                 LedOn(4, clockCounter < 2400);
 
-                // LED 5: bar pulse — brief flash on beat 1 of each bar.
-                // barPulseHold counts down from a short value.
-                // Using 2400 samples = ~50ms flash.
-                LedOn(5, barPulseHold > 0);
+                // LED 5: stereo input detected (Audio In 2 connected)
+                // Solid when a cable is detected in Audio In 2.
+                // Shows bar pulse flash when no stereo input.
+                LedOn(5, stereoInput ? true : (barPulseHold > 0));
             }
         }
     }
