@@ -1195,7 +1195,8 @@ class Robodub : public ComputerCard
     DelayBuffer delayL, delayR;
 
     // --- Input HPF (removes sub-bass mud before delay) ---
-    OnePole inputHPF;
+    OnePole inputHPF;       // Left / mono input HPF
+    OnePole inputHPF_R;     // Right channel HPF (stereo mode only)
 
     // --- Input compressor (tames hot signals, boosts quiet ones) ---
     int32_t compEnvelope;       // Envelope follower state (tracks peak level)
@@ -1805,26 +1806,30 @@ public:
         // Mono (1 cable in Audio In 1): use left channel directly at full level.
         //   No halving — the signal is already at eurorack level via the
         //   Workshop System's built-in amplifier.
-        // Stereo (cable also in Audio In 2): sum to mono with ×6 gain boost
-        //   to bring line-level signals (~±300) up to usable delay levels
-        //   (~±1800). Line level is typically 5-10× quieter than eurorack.
-        //   ×6 brings ±300 → ±1800, which after the -2dB headroom cut
-        //   (×810/1024) at the delay write gives ~±1420 — healthy signal.
-        //   Clamped to prevent overflow on hot line sources.
+        // Stereo (cable also in Audio In 2): keep L/R separate, boost ×6
+        //   to bring line-level signals (~±300) up to usable delay levels.
+        //   Line level is typically 5-10× quieter than eurorack.
+        //   ×6 brings ±300 → ±1800, healthy after -2dB headroom cut.
+        // Mono (1 cable in Audio In 1): left channel feeds both delay lines.
         int32_t inL = AudioIn1();
         int32_t inR = AudioIn2();
         int32_t monoIn;
+        int32_t stereoInL, stereoInR;  // Separate L/R for delay write
         bool stereoInput = Connected(Input::Audio2);
         if (stereoInput)
         {
-            // Stereo line level: sum and boost ×6
-            int32_t sum = (inL + inR) >> 1;
-            monoIn = clamp(sum * 6, -2047, 2047);
+            // Stereo line level: boost each channel ×6, keep separate
+            stereoInL = clamp(inL * 6, -2047, 2047);
+            stereoInR = clamp(inR * 6, -2047, 2047);
+            // Mono sum for sidechain and sample buffer (they're mono)
+            monoIn = clamp((stereoInL + stereoInR) >> 1, -2047, 2047);
         }
         else
         {
             // Mono eurorack level: left channel only, full scale
             monoIn = inL;
+            stereoInL = inL;
+            stereoInR = inL;
         }
 
         // Write dry input to shared state for core 1 sidechain, then wake it
@@ -1835,16 +1840,16 @@ public:
         // ---- Input high-pass filter @ ~80Hz ----
         // Removes sub-bass rumble before the delay to prevent muddy
         // feedback buildup. Coefficient 684 ≈ 80Hz at 48kHz.
-        int32_t filtered = filter_hp(&inputHPF, 684, monoIn);
+        // Left HPF filters left/mono; right HPF filters right channel.
+        // In mono mode both get the same signal (stereoInL == stereoInR).
+        int32_t filteredL = filter_hp(&inputHPF, 684, stereoInL);
+        int32_t filteredR = filter_hp(&inputHPF_R, 684, stereoInR);
+        // Mono path for sample buffer uses left (same as mono in mono mode)
+        int32_t filtered = filteredL;
 
-        // ---- No compressor ----
-        // The input signal passes through with only the HPF applied.
-        // Previous compressor versions caused distortion — likely due
-        // to the per-sample division on the M0+ (no hardware divider)
-        // causing ISR timing overruns. The delay sounds clean without
-        // compression; the feedback path's own clamping handles levels.
+        // No compressor — previous attempts caused ISR timing overruns
+        // on M0+ (no hardware divider). Signal path is clean without it.
         (void)compEnvelope;
-        int32_t compressed = filtered;
 
         // ---- Gate + sample buffer ----
         // Three modes based on switch position:
@@ -1861,7 +1866,8 @@ public:
         if (pulse2Rising) pulse2Lockout = 2400;  // 50ms debounce
         lastPulse2 = currentPulse2;
 
-        int32_t delayInput = 0;
+        int32_t delayInputL = 0;
+        int32_t delayInputR = 0;
 
         if (ttState != TT_OFF)
         {
@@ -1877,10 +1883,13 @@ public:
                 samplebuf_start_capture(&sampleBuf);
                 sampleTrigFlash = 4800;  // Flash LED 3 on capture start
             }
-            if (sampleBuf.capturing) samplebuf_write(&sampleBuf, (int16_t)compressed);
+            // Sample buffer captures mono (left channel / mono sum)
+            if (sampleBuf.capturing) samplebuf_write(&sampleBuf, (int16_t)filtered);
             // Fade-in: ramp gate envelope up over 64 samples (~1.3ms)
             if (gateEnvelope < 64) gateEnvelope++;
-            delayInput = (compressed * gateEnvelope) >> 6;
+            // Feed stereo L/R to delay (in mono mode, filteredL == filteredR)
+            delayInputL = (filteredL * gateEnvelope) >> 6;
+            delayInputR = (filteredR * gateEnvelope) >> 6;
         }
         else if (switchPos == Switch::Middle)
         {
@@ -1904,7 +1913,10 @@ public:
                     sampleTrigFlash = 4800;  // ~100ms flash for LED 3
                 }
             }
-            delayInput = samplebuf_read(&sampleBuf);
+            // Sample playback is mono — feeds both delay channels equally
+            int32_t sampleOut = samplebuf_read(&sampleBuf);
+            delayInputL = sampleOut;
+            delayInputR = sampleOut;
         }
         else // Switch::Up
         {
@@ -2174,9 +2186,10 @@ public:
         // sum to ±4094 and hard-clip, causing audible digital distortion.
         // -2dB caps a full-scale input at ~1618, leaving ~430 counts of
         // headroom before clipping. Subtle enough to not affect first repeat.
-        int32_t inputScaled = (delayInput * 810) >> 10;
-        int32_t writeL = clamp(inputScaled + feedbackL + (feedbackR >> 5), -2047, 2047);
-        int32_t writeR = clamp(inputScaled + feedbackR + (feedbackL >> 5), -2047, 2047);
+        int32_t inputScaledL = (delayInputL * 810) >> 10;
+        int32_t inputScaledR = (delayInputR * 810) >> 10;
+        int32_t writeL = clamp(inputScaledL + feedbackL + (feedbackR >> 5), -2047, 2047);
+        int32_t writeR = clamp(inputScaledR + feedbackR + (feedbackL >> 5), -2047, 2047);
         delay_write(&delayL, (int16_t)writeL);
         delay_write(&delayR, (int16_t)writeR);
 
