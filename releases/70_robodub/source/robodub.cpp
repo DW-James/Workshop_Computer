@@ -1805,18 +1805,21 @@ public:
         // Mono (1 cable in Audio In 1): use left channel directly at full level.
         //   No halving — the signal is already at eurorack level via the
         //   Workshop System's built-in amplifier.
-        // Stereo (cable also in Audio In 2): sum to mono with ×3 gain boost
-        //   to bring line-level signals (~±700) up to usable delay levels
-        //   (~±2047). Clamped to prevent overflow.
+        // Stereo (cable also in Audio In 2): sum to mono with ×6 gain boost
+        //   to bring line-level signals (~±300) up to usable delay levels
+        //   (~±1800). Line level is typically 5-10× quieter than eurorack.
+        //   ×6 brings ±300 → ±1800, which after the -2dB headroom cut
+        //   (×810/1024) at the delay write gives ~±1420 — healthy signal.
+        //   Clamped to prevent overflow on hot line sources.
         int32_t inL = AudioIn1();
         int32_t inR = AudioIn2();
         int32_t monoIn;
         bool stereoInput = Connected(Input::Audio2);
         if (stereoInput)
         {
-            // Stereo line level: sum and boost ×3
+            // Stereo line level: sum and boost ×6
             int32_t sum = (inL + inR) >> 1;
-            monoIn = clamp(sum * 3, -2047, 2047);
+            monoIn = clamp(sum * 6, -2047, 2047);
         }
         else
         {
