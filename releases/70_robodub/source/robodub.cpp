@@ -1852,6 +1852,29 @@ public:
             sixteenthPhase = 0;
             sixteenthState = true;  // Fire on the downbeat
         }
+        // Tap tempo internal clock: generate virtual quarter-note beats
+        // from clockPeriod when no external clock is driving Pulse In 1.
+        // This keeps bar pulses, 16th notes, and LFO sync running after
+        // tap tempo sets the tempo. Real external clock overrides this
+        // (tapTempoLocked gets cleared on PulseIn1RisingEdge above).
+        if (tapTempoLocked && clockPeriod > 0 && clockCounter >= clockPeriod)
+        {
+            clockCounter = 0;
+
+            // Bar counter: count quarter notes 0-3, fire bar pulse on beat 1
+            barCounter++;
+            if (barCounter >= 4)
+            {
+                barCounter = 0;
+                barPulseState = true;
+                barPulseHold = 2400;  // ~50ms flash for LED + pulse output
+            }
+
+            // Reset 16th note phase on each virtual quarter note
+            beatCounter = 0;
+            sixteenthState = true;
+        }
+
         // If no clock for 2 seconds, fall back to default tempo.
         // Don't clear sync if tap tempo set it — there's no external clock to timeout.
         if (clockCounter > 96000 && !tapTempoLocked) clockSynced = false;
