@@ -2629,8 +2629,11 @@ static void core1_sidechain_entry()
 
 int main()
 {
-    // 144MHz reduces ADC tonal artifacts and gives more CPU headroom.
-    set_sys_clock_khz(144000, true);
+    // 200MHz gives ~4167 cycles per 48kHz sample — 39% more budget than
+    // 144MHz (3000 cycles). Needed for tap tempo state machine, fade
+    // envelopes, and multiband compressor without ISR overruns.
+    // Well within RP2040 spec (rated to 133MHz, runs reliably to 250MHz+).
+    set_sys_clock_khz(200000, true);
 
     // Static allocation — keeps large object off the small RP2040 stack.
     static Robodub robodub;
