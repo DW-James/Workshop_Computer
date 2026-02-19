@@ -2100,14 +2100,6 @@ public:
             feedbackR -= ((hiR - loR) * 154) >> 10;
         }
 
-        // Soft saturation in the feedback loop: tames whichever frequency
-        // is "winning" without needing surgical EQ. Knee at ±1800 (88% of
-        // DAC range) — most signal passes clean, but resonant peaks get
-        // 2:1 compression. Much more musical than hard clipping, which
-        // sprays energy into harmonics that can feed new resonances.
-        feedbackL = delay_soft_clip(feedbackL);
-        feedbackR = delay_soft_clip(feedbackR);
-
         // ---- Write to delay ----
         // Stereo cross-feed: full same-channel + 3% bleed from opposite.
         // Just enough to gently widen the stereo image over many repeats
@@ -2116,8 +2108,13 @@ public:
         // so we only need a hint of cross-feed on top of that.
         // Total loop gain contribution: ~103% — close enough to unity
         // that the feedback LUT doesn't need to compensate.
-        int32_t writeL = clamp(delayInput + feedbackL + (feedbackR >> 5), -2047, 2047);
-        int32_t writeR = clamp(delayInput + feedbackR + (feedbackL >> 5), -2047, 2047);
+        //
+        // Soft saturation at the write point: catches the sum of input +
+        // feedback + crossfeed. Knee at ±1800, 2:1 above, hard limit at
+        // ±2047. Tames peaks that would hard-clip on the DAC, and naturally
+        // limits whichever frequency is "winning" in the feedback loop.
+        int32_t writeL = delay_soft_clip(delayInput + feedbackL + (feedbackR >> 5));
+        int32_t writeR = delay_soft_clip(delayInput + feedbackR + (feedbackL >> 5));
         delay_write(&delayL, (int16_t)writeL);
         delay_write(&delayR, (int16_t)writeR);
 
