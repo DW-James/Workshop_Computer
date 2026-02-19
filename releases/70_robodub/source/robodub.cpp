@@ -1269,6 +1269,10 @@ class Robodub : public ComputerCard
     // --- Stereo delay lines ---
     DelayBuffer delayL, delayR;
 
+    // --- Dry signal passthrough (end-of-chain mode) ---
+    volatile bool dryPassthrough;   // false=insert (wet only), true=end-of-chain (wet+dry)
+    int32_t dryL, dryR;            // Dry input stored for output mix (post-boost, pre-HPF)
+
     // --- Input HPF (removes sub-bass mud before delay) ---
     OnePole inputHPF;       // Left / mono input HPF
     OnePole inputHPF_R;     // Right channel HPF (stereo mode only)
@@ -1699,7 +1703,11 @@ public:
         delay_init(&delayL, DELAY_BUFFER_MAX);
         delay_init(&delayR, DELAY_BUFFER_MAX);
 
+        dryPassthrough = false;
+        dryL = 0;
+        dryR = 0;
         filter_init(&inputHPF);
+        filter_init(&inputHPF_R);
         compEnvelope = 0;
         filter_init(&feedbackLPF_L);
         filter_init(&feedbackLPF_R);
@@ -1935,6 +1943,11 @@ public:
             stereoInL = inL;
             stereoInR = inL;
         }
+
+        // Store dry signal for end-of-chain passthrough (post-boost, pre-HPF).
+        // Full frequency range preserved — HPF only needed for delay feedback.
+        dryL = stereoInL;
+        dryR = stereoInR;
 
         // Write dry input to shared state for core 1 sidechain, then wake it
         sidechain.dry_mono = monoIn;
@@ -2297,18 +2310,22 @@ public:
         delay_write(&delayR, (int16_t)writeR);
 
         // ---- Output mix ----
-        // Output is delay-only. No dry signal passthrough.
-        // This card is designed to be wired in a feedback loop (mixer
-        // send/return or similar), so passing the input audio straight
-        // to the output would cause howling. The audio enters the delay
-        // buffer, and you hear it after the delay time has elapsed.
-        // A web config option could enable dry passthrough for users
-        // who want to use this as an end-of-chain effect.
-        // Dip energy compensation is now baked into the feedback curve LUT
-        // (each value ×1.030) so the loop gain is correct without any
-        // separate makeup gain here or in the feedback path.
-        int32_t outL = clamp(delOutL, -2047, 2047);
-        int32_t outR = clamp(delOutR, -2047, 2047);
+        // Insert mode (default): delay-only output. Designed for mixer
+        //   send/return loops where dry is already in the mix.
+        // End-of-chain mode (web config): dry + wet summed. For use as
+        //   a standalone effect where the delay is the only signal path.
+        // Dip energy compensation baked into feedback curve LUT (×1.030).
+        int32_t outL, outR;
+        if (dryPassthrough)
+        {
+            outL = clamp(delOutL + dryL, -2047, 2047);
+            outR = clamp(delOutR + dryR, -2047, 2047);
+        }
+        else
+        {
+            outL = clamp(delOutL, -2047, 2047);
+            outR = clamp(delOutR, -2047, 2047);
+        }
 
         // ---- Ring modulator (Y knob / CV In 2) ----
         // Y knob controls both the carrier frequency AND the ring mod
