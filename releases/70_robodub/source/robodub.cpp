@@ -1896,15 +1896,11 @@ public:
         }
         lastSwitchDown = (switchPos == Switch::Down);
 
-        // Gate envelope fade-out: when switch leaves Down, ramp the input
-        // to silence over 64 samples (~1.3ms) to avoid a click at the cut.
-        // Only ADD to delayInput (don't overwrite sample playback output).
-        if (switchPos != Switch::Down && gateEnvelope > 0)
-        {
-            gateEnvelope--;
-            // Mix fading live input on top of whatever delayInput already has
-            delayInput += (compressed * gateEnvelope) >> 6;
-        }
+        // Reset gate envelope when switch leaves Down.
+        // No fade-out needed — the delay buffer already contains the audio,
+        // so dropping delayInput to 0 doesn't create an audible discontinuity
+        // at the output. The fade-in on press is what matters for clean entry.
+        if (switchPos != Switch::Down) gateEnvelope = 0;
 
         // ---- Feedback amount (Main knob, custom curve) ----
         int32_t fbAmount = get_feedback(mainKnob);
