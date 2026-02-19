@@ -2648,16 +2648,8 @@ public:
         }
 
         // ---- 8-band multiband compressor (output only) ----
-        // Switch Up = bypass compressor (for A/B testing).
         // Gain computation runs decimated (every 10 samples ≈ 4.8kHz).
         // Band splitting + gain application runs every sample.
-        if (switchPos == Switch::Up)
-        {
-            // Bypass: force all bands to unity gain
-            for (int i = 0; i < NUM_BANDS; i++)
-                mb.band_gain[i] = 1024;
-        }
-        else
         {
             mb.decimCounter++;
             if (mb.decimCounter >= MULTIBAND_DECIM)

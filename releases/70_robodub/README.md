@@ -24,7 +24,7 @@ Robodub is a fun, playable stereo audio delay effect designed for immediate, han
 | **Y knob** | Ring mod — dry/wet mix and frequency sweep from ~1Hz tremolo to ~2kHz metallic. |
 | **Switch Down** | Capture + feed. Hold to feed audio into the delay and save a sample. |
 | **Switch Middle** | Sample locked. Pulse In 2 replays the captured sample with X knob decorations. |
-| **Switch Up** | Sample mute. Pulse In 2 is ignored. Also bypasses the multiband compressor for A/B comparison. |
+| **Switch Up** | Sample mute. Pulse In 2 is ignored. The delay tail rings out undisturbed. |
 | **Audio In 1** | Main audio input (mono eurorack level, or use Amplifier module for instruments/line level). |
 | **Audio In 2** | Stereo right channel. Stereo mode auto-detects. Use Stereo Input module for line-level sources. |
 | **CV In 1** | Ring mod FM — modulates the carrier frequency. |

@@ -49,7 +49,7 @@ Syncs to external clock signal into Pulse 1 input or manual tap tempo
 |----------|-----------|
 | **Down** (momentary) | **Capture + feed.** Hold down to feed audio into the delay. Release to lock the captured sample. |
 | **Middle** | **Sample locked.** Pulse In 2 replays the captured sample - X knob position dictates chance and effects of playback. |
-| **Up** | **Sample Mute switch.** Pulse In 2 is ignored. The delay tail rings out undisturbed. Also bypasses the multiband compressor for A/B comparison. |
+| **Up** | **Sample Mute switch.** Pulse In 2 is ignored. The delay tail rings out undisturbed. |
 
 ### Inputs
 
