@@ -2100,16 +2100,13 @@ public:
             feedbackR -= ((hiR - loR) * 154) >> 10;
         }
 
-        // Compensate for energy lost in the two dips above.
-        // Each dip removes ~15% of a narrow band (~2-3% of total energy).
-        // A ~3% broadband boost restores unity at the 50% knob point.
-        // 1055/1024 ≈ 1.030 (+0.26dB).
-        feedbackL = (feedbackL * 1055) >> 10;
-        feedbackR = (feedbackR * 1055) >> 10;
-
-        // Hard clamp to DAC range before writing back to delay
-        feedbackL = clamp(feedbackL, -2047, 2047);
-        feedbackR = clamp(feedbackR, -2047, 2047);
+        // Soft saturation in the feedback loop: tames whichever frequency
+        // is "winning" without needing surgical EQ. Knee at ±1800 (88% of
+        // DAC range) — most signal passes clean, but resonant peaks get
+        // 2:1 compression. Much more musical than hard clipping, which
+        // sprays energy into harmonics that can feed new resonances.
+        feedbackL = delay_soft_clip(feedbackL);
+        feedbackR = delay_soft_clip(feedbackR);
 
         // ---- Write to delay ----
         // Stereo cross-feed: full same-channel + 3% bleed from opposite.
@@ -2132,8 +2129,12 @@ public:
         // buffer, and you hear it after the delay time has elapsed.
         // A web config option could enable dry passthrough for users
         // who want to use this as an end-of-chain effect.
-        int32_t outL = clamp(delOutL, -2047, 2047);
-        int32_t outR = clamp(delOutR, -2047, 2047);
+        // Compensation for energy lost in the feedback EQ dips (~3%).
+        // Applied at the output, NOT inside the feedback loop — putting
+        // makeup gain inside the loop compounds every round trip and
+        // destabilises the system. At the output it's a one-time boost.
+        int32_t outL = clamp((delOutL * 1055) >> 10, -2047, 2047);
+        int32_t outR = clamp((delOutR * 1055) >> 10, -2047, 2047);
 
         // ---- Ring modulator (Y knob / CV In 2) ----
         // Y knob controls both the carrier frequency AND the ring mod
