@@ -12,7 +12,7 @@ You feed it small seeds of your audio signal and they grow, bloom, and get repla
 It's inspired by the Dub-Delay mixing technique, by the lovely feedback-rich Zen Delay pedal and by glitchy sample based effects like Qubit Data Bender or Hologram Microcosm.
 
 **Stereo Tape-style delay**
- The big main knob is the feedback for the delay. Generally speaking, straight up 50% is unity where nothing is lost or gained, to the left the repeats will fade, to the right they will accumulate and bloom. Each channel has its own slow pitch wobble at a different rate, creating stereo drift like two slightly wonky tape machines. As the feedback increases, occasional random tape glitches (brief pitch hiccups) start to appear — rare at unity, more frequent as you push into bloom territory.
+ The big main knob is the feedback for the delay. Straight up 50% is unity where nothing is lost or gained, to the left the repeats will fade, to the right they will accumulate and bloom. Each channel has its own slow pitch wobble at a different rate, creating stereo drift like two slightly wonky tape machines.
 
 **12 bit crunchy Sample buffer**
 When you send audio into the delay by pushing the toggle switch down, it is also saved as a short, crunchy 12 bit sample in the computer (2 sec mono, 1 sec stereo). Sending a signal into the Pulse 2 input then triggers repeatable playback of this sample into the delay loop, with chance and decoration randomisations dictated by the X knob position. Toggling the switch down at any point adds fresh dry signal to the delay and updates the saved sample.
@@ -21,12 +21,12 @@ When you send audio into the delay by pushing the toggle switch down, it is also
 The Y knob controls both the After Effect's Dry/Wet and Oscillator Frequency. It's a ring-mod style effect which adds tremolo, warble, or metallic overtones. It comes after the delay and is non-destructive to the delay loop. It is self contained, but can be additionally frequency modulated by external signals fed into CV1. CV2 input can be used to modulate the Y knob value. With a cable in CV2, the Y knob becomes the attenuator for the CV2 modulation.
 
 **Multiband compressor**
-Delays can get wild and overpowering. This delay has an 8-band compressor on the output which also references the input signal 4,800 times per second. This compressor accentuates the interesting tonal and spatial details in the delay feedback, controls wild spikes and dynamically sidechain-ducks those frequency bands most present in the Dry audio signal, allowing the final output of the effect to react to a mix and rhythmically EQ itself to adapt to fit in. So your main mix kicks and lead lines are still clear against the big wash of delay.
+Delays can get wild and overpowering. This delay has an 8-band compressor on the output which also references the input signal 4,800 times per second. This compressor accentuates the interesting tonal and spatial details in the delay feedback, controls wild spikes and dynamically sidechain-ducks those frequency bands most present in the Dry audio signal, allowing the final output of the effect to react to a mix and real-time EQ itself to adapt to fit in. So your main mix kicks and lead lines stay coherent against a big wash of delay.
 
 **Clock sync**
 Syncs to external clock signal into Pulse 1 input or manual tap tempo
 
-**Two routing modes**:
+**Two Audio routing modes**:
 **Insert mode** **default** (wet/effect-only) for use as mixer send effect and for simultaneous connection to gear with audio IN and OUT where feedback loops would be problematic, eg: Synthstrom Deluge, Yamaha Reface CP, Roland S-1
 **End-of-chain mode** (dry+wet) Computer will output a full stereo mix.
 
@@ -39,9 +39,9 @@ Syncs to external clock signal into Pulse 1 input or manual tap tempo
 
 | Knob | Function |
 |------|----------|
-| **Main** | **Feedback amount.** Below halfway: repeats fade. Halfway: sustain (unity). Above: bloom and growth up to 106%. Cross-feed adds ~3% stereo spread per repeat. |
-| **X** | **Chaos** — Playback density and decoration probability. Decorations include ratchets, octave-up, reverse, two-octave sparkle. Each trigger rolls the dice. Effects stack. |
-| **Y** | **Ring mod** — Dry wet mix and frequency sweep from ~1Hz tremolo to ~2kHz metallic. Some dry delay signal is always present underneath. |
+| **Main Knob** | **Feedback amount.** Below halfway: repeats fade. Halfway: sustain (unity). Above: bloom and growth up to 106%. Cross-feed adds ~3% stereo spread per repeat. |
+| **X Knob** | **Chaos** — Progressively increases playback density and decoration probability. Decorations include ratchets, octave-up, reverse, two-octave sparkle. Each trigger rolls the dice. Effects stack. |
+| **Y Knob** | **Ring mod After-Effect** — Controls dry/wet mix and frequency sweep from ~1Hz tremolo to ~2kHz metallic. Some dry delay signal is always present underneath. |
 
 ### Switch
 
@@ -56,7 +56,7 @@ Syncs to external clock signal into Pulse 1 input or manual tap tempo
 | Input | Function |
 |-------|----------|
 | **Audio In 1** (top left) | Main audio input. See *Audio Routing* below. |
-| **Audio In 2**  | Stereo right channel (optional). When a cable is detected, stereo input mode activates automatically. |
+| **Audio In 2**  | Stereo right channel input (optional). When a cable is detected, stereo input mode activates automatically. |
 | **CV In 1** | Ring mod FM. Modulates the Ring mod effect carrier frequency. |
 | **CV In 2** | Ring mod mix CV. Replaces the Y knob value when a cable is patched. |
 | **Pulse In 1** | Clock input. Auto BPM detection. Delay time syncs to dotted-eighth note relative to the incoming clock. |
@@ -82,7 +82,7 @@ Syncs to external clock signal into Pulse 1 input or manual tap tempo
 
 Plug a single cable into **Audio In 1**. The signal is fed to both left and right delay lines, creating a stereo soundscape from a mono source.
 
-**Getting the right level:** The audio input expects eurorack-level signals (roughly ±5V). If you're connecting an instrument, microphone, or line-level device directly, use the Workshop System's **Amplifier** module to boost the signal first. Watch the **clip indicator LED** (top left LED) and adjust the amplifier level to stay just below clipping.
+**Getting the right level:** The audio input expects eurorack-level signals (roughly ±5V). If you're connecting an instrument, microphone, or line-level device directly, use the Workshop System's **Amplifier** module to boost the signal first. Watch the **clip indicator** (top left LED) and adjust the amplifier level to stay just below clipping.
 
 ### Stereo Input
 
@@ -92,9 +92,10 @@ Plug cables into both **Audio In 1** (left) and **Audio In 2** (right). Stereo m
 
 **Line-level stereo** (e.g. phone, laptop, mixer output, drum machine): Use the Workshop System's **Stereo Input** module, which boosts the signal to eurorack level before it reaches Robodub. Again, watch the clip indicator and adjust your source volume so you're not hitting clipping, unless crackly noises are desirable.
 
+
 ### Insert Mode (default)
 
-Output is **wet-only** (delay + effects). Designed for mixer send/return loops where the dry signal is already in the mix. This is the default mode.
+Output is **wet-only** (delay + effects). Designed for mixer send/return loops where the dry signal is already in the mix. **This is the default mode**.
 
 ### End-of-Chain Mode
 
@@ -138,8 +139,8 @@ It starts to capture audio the moment the switch is held **Down** and replays it
 - **Stereo mode:** Up to 1 second at 24kHz (24,000 frames, 96KB interleaved)
 - **Chance and Decoration effects** (controlled by X knob): Chance of playback, ratchet (rapid repeats), octave-up, reverse playback, two-octave sparkle.
 
-Generally speaking, the X knob minimum anticlockwise setting has minimum chance of firing and no decoration effects. As you turn it clockwise you progressively get higher chance and greater potential for decorations.
-Switch Up position is a playable mute and the sampler will ignore trigger inputs.
+Generally speaking, the X knob minimum anticlockwise setting has lowest chance of firing and no decoration effects. As you turn it clockwise you progressively get higher chance and greater potential for decorations.
+Switch Up position is a playable mute - the sampler will ignore trigger inputs.
 ---
 
 ## LEDs
@@ -243,6 +244,7 @@ ninja
 
 Flash the resulting `robodub.uf2` to a Workshop System Computer card.
 
----
 
-*AI-generated (Claude) + James Robinson. Built on ComputerCard v0.2.8.*
+Big thanks to Tom Whitwell and Chris Jonhson
+
+Author: James Robinson (Jimantronic) + Claude Code AI. Built on ComputerCard v0.2.8.*
