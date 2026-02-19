@@ -808,6 +808,10 @@ struct SampleBuffer
     // Power-of-2 length (64) so the fade uses shifts instead of division.
     int32_t  fadeOutValue;     // Value to fade from (captured at retrigger)
     int32_t  fadeOutCounter;   // Counts down from 64 → 0
+
+    // Fade-in on playback start: ramps from 0 to full over 64 samples (~1.3ms).
+    // Prevents clicks from non-zero first samples.
+    int32_t  fadeInCounter;    // Counts up from 0 → 64 (64 = fully faded in)
 };
 
 static void samplebuf_init(SampleBuffer *sb)
@@ -834,6 +838,7 @@ static void samplebuf_init(SampleBuffer *sb)
     sb->captureTimer = 0;
     sb->fadeOutValue = 0;
     sb->fadeOutCounter = 0;
+    sb->fadeInCounter = 64;  // Start fully faded in (no ramp on init)
 }
 
 // Called every 48kHz sample during capture.
@@ -913,14 +918,7 @@ static inline int16_t __not_in_flash_func(samplebuf_read)(SampleBuffer *sb)
         {
             // Odd samples: interpolate halfway between last and next
             rawSample = ((int32_t)sb->lastPlaySample + (int32_t)sb->nextPlaySample) >> 1;
-
-            // Blend with crossfade and return
-            if (sb->fadeOutCounter > 0)
-            {
-                int32_t fadeIn = (rawSample * (64 - sb->fadeOutCounter)) >> 6;
-                return (int16_t)(fadeIn + fadeContrib);
-            }
-            return (int16_t)rawSample;
+            goto apply_envelopes;
         }
     }
 
@@ -969,7 +967,28 @@ static inline int16_t __not_in_flash_func(samplebuf_read)(SampleBuffer *sb)
 
     rawSample = (int32_t)sb->lastPlaySample;
 
-    // Blend with crossfade
+apply_envelopes:
+    // Fade-in: ramp from silence over 64 samples (~1.3ms) at playback start
+    if (sb->fadeInCounter < 64)
+    {
+        sb->fadeInCounter++;
+        rawSample = (rawSample * sb->fadeInCounter) >> 6;
+    }
+
+    // Fade-out near end of sample: ramp to silence over last 64 samples.
+    // Prevents clicks when the sample data ends at a non-zero value.
+    // Uses distance-to-end in 24kHz sample positions.
+    {
+        uint32_t samplesLeft;
+        if (sb->reverse)
+            samplesLeft = sb->playPos;
+        else
+            samplesLeft = (sb->playPos < sb->length) ? (sb->length - sb->playPos) : 0;
+        if (samplesLeft < 64)
+            rawSample = (rawSample * (int32_t)samplesLeft) >> 6;
+    }
+
+    // Retrigger crossfade: blend old playback out, new playback in
     if (sb->fadeOutCounter > 0)
     {
         int32_t fadeIn = (rawSample * (64 - sb->fadeOutCounter)) >> 6;
@@ -1032,6 +1051,7 @@ static inline void samplebuf_trigger_play(SampleBuffer *sb)
 
         sb->playing = true;
         sb->playbackTimer = 0;
+        sb->fadeInCounter = 0;  // Start fade-in ramp from silence
     }
 }
 
@@ -1216,6 +1236,7 @@ class Robodub : public ComputerCard
     // --- Sample buffer ---
     SampleBuffer sampleBuf;
     bool lastSwitchDown;       // Track switch transitions
+    int32_t gateEnvelope;      // Fade-in/out for Switch::Down input (0-64)
     bool lastPulse2;           // Track Pulse In 2 edges
     uint32_t pulse2Lockout;    // Debounce: counts down after a trigger, blocks re-triggers
 
@@ -1625,6 +1646,7 @@ public:
 
         samplebuf_init(&sampleBuf);
         lastSwitchDown = false;
+        gateEnvelope = 0;
         lastPulse2 = false;
         pulse2Lockout = 0;
 
@@ -1825,7 +1847,9 @@ public:
                 sampleTrigFlash = 4800;  // Flash LED 3 on capture start
             }
             if (sampleBuf.capturing) samplebuf_write(&sampleBuf, (int16_t)compressed);
-            delayInput = compressed;
+            // Fade-in: ramp gate envelope up over 64 samples (~1.3ms)
+            if (gateEnvelope < 64) gateEnvelope++;
+            delayInput = (compressed * gateEnvelope) >> 6;
         }
         else if (switchPos == Switch::Middle)
         {
@@ -1866,6 +1890,15 @@ public:
             // its existing content (feedback path still active).
         }
         lastSwitchDown = (switchPos == Switch::Down);
+
+        // Gate envelope fade-out: when switch leaves Down, ramp the input
+        // to silence over 64 samples (~1.3ms) to avoid a click at the cut.
+        if (switchPos != Switch::Down && gateEnvelope > 0)
+        {
+            gateEnvelope--;
+            // Continue feeding fading audio during the ramp-down
+            delayInput = (compressed * gateEnvelope) >> 6;
+        }
 
         // ---- Feedback amount (Main knob, custom curve) ----
         int32_t fbAmount = get_feedback(mainKnob);
