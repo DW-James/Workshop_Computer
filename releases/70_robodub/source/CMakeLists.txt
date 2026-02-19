@@ -4,7 +4,7 @@ project(robodub C CXX ASM)
 set(CMAKE_CXX_STANDARD 17)
 pico_sdk_init()
 
-add_executable(robodub robodub.cpp)
+add_executable(robodub robodub.cpp usb_descriptors.c)
 
 # Catch accidental double-precision math (very slow on RP2040)
 target_compile_options(robodub PRIVATE -Wdouble-promotion -Wfloat-conversion -Wall -Wextra)
@@ -24,12 +24,19 @@ target_include_directories(robodub PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}/../../../Demonstrations+HelloWorlds/PicoSDK/ComputerCard/
 )
 
-# Required hardware libraries for ComputerCard + flash config
+# TinyUSB needs to find tusb_config.h in our source directory
+target_include_directories(robodub PUBLIC
+    ${CMAKE_CURRENT_LIST_DIR}
+)
+
+# Required hardware libraries for ComputerCard + flash config + USB MIDI
 target_link_libraries(robodub
     pico_unique_id
     pico_stdlib
     pico_multicore
     pico_flash
+    tinyusb_device
+    tinyusb_board
     hardware_dma
     hardware_i2c
     hardware_pwm
@@ -39,7 +46,7 @@ target_link_libraries(robodub
     hardware_sync
 )
 
-# Disable USB stdio — interferes with GPIO4 normalisation probe
+# Disable USB stdio — we use TinyUSB directly for MIDI device
 pico_enable_stdio_usb(robodub 0)
 
 # Generate .uf2 output for flashing to program cards

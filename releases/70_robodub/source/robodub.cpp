@@ -61,6 +61,7 @@
 #include "hardware/clocks.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
+#include "tusb.h"
 #include <cmath>    // for sinf() — used at startup only, never in ISR
 #include <cstring>  // for memcpy
 
@@ -182,6 +183,35 @@ static void config_defaults(RobodubConfig *cfg)
     cfg->version = 1;
     cfg->dryPassthrough = 0;  // Insert mode (wet only) by default
 }
+
+
+// ============================================================================
+// USB MIDI SysEx protocol
+// ============================================================================
+// Bidirectional config messages between firmware and web interface.
+// All data bytes are 7-bit (0x00-0x7F) per MIDI SysEx rules.
+// Manufacturer ID 0x7D = prototyping/private use (same as ComputerCard examples).
+//
+// Message format: [0xF0, 0x7D, <msg_id>, <data...>, 0xF7]
+// ProcessIncomingSysEx receives just <msg_id> + <data...> (header/footer stripped).
+
+static constexpr uint8_t MIDI_MANUFACTURER_ID = 0x7D;
+
+// Firmware version (sent to web interface on request)
+static constexpr uint8_t ROBODUB_VERSION_MAJOR = 0;
+static constexpr uint8_t ROBODUB_VERSION_MINOR = 9;
+static constexpr uint8_t ROBODUB_VERSION_PATCH = 0;
+
+// SysEx message IDs
+static constexpr uint8_t SYSEX_SET_DRY_PASSTHROUGH = 0x01; // web → firmware: [0x01, 0|1]
+static constexpr uint8_t SYSEX_SAVE_TO_FLASH       = 0x02; // web → firmware: [0x02]
+static constexpr uint8_t SYSEX_REQUEST_CONFIG       = 0x03; // web → firmware: [0x03]
+static constexpr uint8_t SYSEX_CONFIG_STATE         = 0x04; // firmware → web: [0x04, dryPassthrough]
+static constexpr uint8_t SYSEX_FIRMWARE_VERSION     = 0x10; // firmware → web: [0x10, maj, min, patch]
+
+// SysEx parsing buffer (512 bytes max, same as web_interface example)
+static constexpr unsigned SYSEX_BUF_SIZE = 512;
+static constexpr unsigned RX_BUF_SIZE = 64;
 
 
 // ============================================================================
@@ -766,6 +796,17 @@ struct SidechainState {
     int32_t dry_env[NUM_BANDS];         // Per-band envelope followers
     uint32_t last_tick;                 // Last processed tick
 };
+
+// Shared USB/SysEx state between core 0 (ISR) and core 1 (USB + sidechain).
+// Core 1 processes SysEx commands and updates config directly.
+// The volatile bool pointer lets core 1 update the audio path's dry passthrough
+// flag without needing access to the Robodub class.
+struct SharedUSBState {
+    volatile bool *dryPassthroughPtr;   // Points to Robodub::dryPassthrough
+    RobodubConfig *configPtr;           // Points to Robodub::config (for save)
+};
+
+static SharedUSBState *g_usb_state = nullptr;
 
 // Forward declaration — the actual loop is defined after the class
 static void core1_sidechain_entry();
@@ -1456,6 +1497,9 @@ class Robodub : public ComputerCard
     // --- Flash-persistent configuration ---
     RobodubConfig config;          // Current config (loaded from flash on boot)
 
+    // --- USB MIDI state (shared with core 1) ---
+    SharedUSBState usbState;
+
     // --- Tap tempo ---
     TapTempoState ttState;
 
@@ -1895,6 +1939,12 @@ public:
             sidechain.duck_gain[i] = 1024;  // Unity (no ducking) until core 1 starts
 
         g_sidechain = &sidechain;
+
+        // USB MIDI state — pointers into this class for core 1 SysEx handler
+        usbState.dryPassthroughPtr = &dryPassthrough;
+        usbState.configPtr = &config;
+        g_usb_state = &usbState;
+
         multicore_launch_core1(core1_sidechain_entry);
 
         // Tap tempo — all off / zeroed
@@ -2799,24 +2849,111 @@ public:
 
 
 // ============================================================================
-// Core 1: Sidechain ducking loop
+// Core 1: Sidechain ducking + USB MIDI polling
 // ============================================================================
-// Runs on the second RP2040 core. Reads dry input from shared volatiles,
-// splits into 8 frequency bands, computes per-band envelope followers,
-// and writes duck_gain values back to shared state for core 0 to apply.
+// Runs on the second RP2040 core. Two responsibilities:
+//
+// 1. SIDECHAIN DUCKING: Reads dry input from shared volatiles, splits into
+//    8 frequency bands, computes per-band ducking gains for core 0 to apply.
+//    Decimated to ~4.8kHz (every 10th sample).
+//
+// 2. USB MIDI: Polls TinyUSB for incoming SysEx config messages from the
+//    web interface. tud_task() is non-blocking (~µs), so it fits naturally
+//    between sidechain processing cycles without adding latency.
 //
 // Startup safety: waits for core 0's 2-second startup mute to complete
-// before processing any audio. This prevents noise from uninitialised
-// filters/buffers being interpreted as envelope data.
+// before processing any audio.
 //
 // Sleep strategy: uses __wfe() (ARM wait-for-event) to sleep between
 // processing cycles. Core 0 sends __sev() after each new sample.
 // This means core 1 generates ZERO bus traffic while sleeping, unlike
 // a spin-wait loop on a volatile that constantly reads SRAM.
 
+// SysEx send helper — blocks until all data is queued.
+// A single tud_midi_stream_write call may not send all bytes if the
+// TinyUSB buffer is full (typically fails around ~48 bytes).
+static void midi_stream_write_blocking(uint8_t cable, const uint8_t *data, uint32_t size)
+{
+    uint32_t sent = 0;
+    while (sent < size)
+    {
+        uint32_t n = tud_midi_stream_write(cable, data + sent, size - sent);
+        sent += n;
+        if (!n) tud_task();  // Pump USB if buffer was full
+    }
+}
+
+// Send a SysEx message with the Robodub manufacturer ID.
+// data/size = payload only (no F0/manufacturer/F7).
+static void send_sysex(const uint8_t *data, uint32_t size)
+{
+    uint8_t header[] = { 0xF0, MIDI_MANUFACTURER_ID };
+    uint8_t footer[] = { 0xF7 };
+    midi_stream_write_blocking(0, header, 2);
+    midi_stream_write_blocking(0, data, size);
+    midi_stream_write_blocking(0, footer, 1);
+}
+
+// Send current config state to web interface
+static void send_config_state(SharedUSBState *usb)
+{
+    uint8_t msg[] = { SYSEX_CONFIG_STATE, usb->configPtr->dryPassthrough };
+    send_sysex(msg, sizeof(msg));
+}
+
+// Send firmware version to web interface
+static void send_firmware_version()
+{
+    uint8_t msg[] = { SYSEX_FIRMWARE_VERSION,
+                      ROBODUB_VERSION_MAJOR,
+                      ROBODUB_VERSION_MINOR,
+                      ROBODUB_VERSION_PATCH };
+    send_sysex(msg, sizeof(msg));
+}
+
+// Process an incoming SysEx message (payload only, no F0/manufacturer/F7).
+static void process_incoming_sysex(const uint8_t *data, uint32_t size,
+                                   SharedUSBState *usb)
+{
+    if (size < 1) return;
+
+    switch (data[0])
+    {
+    case SYSEX_SET_DRY_PASSTHROUGH:
+        if (size == 2)
+        {
+            bool newVal = (data[1] != 0);
+            *usb->dryPassthroughPtr = newVal;
+            usb->configPtr->dryPassthrough = newVal ? 1 : 0;
+            // Echo back the new config state
+            send_config_state(usb);
+        }
+        break;
+
+    case SYSEX_SAVE_TO_FLASH:
+        // Save current config to flash (brief audio glitch)
+        config_save(usb->configPtr);
+        // Confirm by echoing config state
+        send_config_state(usb);
+        break;
+
+    case SYSEX_REQUEST_CONFIG:
+        // Send both config state and firmware version
+        send_config_state(usb);
+        send_firmware_version();
+        break;
+
+    default:
+        // Unknown message — echo it back for debugging (same as web_interface example)
+        send_sysex(data, size);
+        break;
+    }
+}
+
 static void core1_sidechain_entry()
 {
     volatile SharedSidechain *sc = g_sidechain;
+    SharedUSBState *usb = g_usb_state;
     SidechainState state;
 
     // Init core 1's private filter/envelope state
@@ -2826,12 +2963,26 @@ static void core1_sidechain_entry()
         state.dry_env[i] = 0;
     state.last_tick = 0;
 
+    // ---- USB MIDI INIT ----
+    // Initialize TinyUSB on core 1 before the startup wait.
+    // USB enumeration can happen during the 2-second mute — the host
+    // will see "Robodub" appear as a MIDI device immediately.
+    tusb_init();
+
+    // SysEx parsing state (same FSM as web_interface example)
+    uint8_t *sysexBuf = (uint8_t *)malloc(SYSEX_BUF_SIZE);
+    uint8_t *rxBuf = (uint8_t *)malloc(RX_BUF_SIZE);
+    bool sysexActive = false;
+    unsigned sysexLen = 0;
+
     // ---- STARTUP WAIT ----
     // Sleep until core 0 signals that audio is fully initialised.
-    // This is the fix for the startup noise — core 1 does nothing
-    // until the 2-second mute is over and real audio is flowing.
+    // Keep polling USB during the wait so the device enumerates.
     while (!sc->ready)
+    {
+        tud_task();  // Non-blocking USB poll
         __wfe();
+    }
 
     // Drain any pending SEV events accumulated during startup mute
     __sev();  // Set event flag so next __wfe() doesn't block
@@ -2845,6 +2996,53 @@ static void core1_sidechain_entry()
         // Sleep until core 0 wakes us with __sev()
         __wfe();
 
+        // ---- USB MIDI POLL ----
+        // tud_task() is non-blocking (~µs). Called every __wfe() wakeup
+        // (~48kHz), which is far more frequent than USB needs but has
+        // negligible cost.
+        tud_task();
+
+        // Check for incoming MIDI data
+        while (tud_midi_available())
+        {
+            uint32_t bytesReceived = tud_midi_stream_read(rxBuf, RX_BUF_SIZE);
+            if (bytesReceived == 0) break;
+
+            // Parse SysEx out of the MIDI byte stream (FSM from web_interface)
+            for (unsigned i = 0; i < bytesReceived; i++)
+            {
+                uint8_t b = rxBuf[i];
+
+                if (!sysexActive)
+                {
+                    if (b == 0xF0)
+                    {
+                        sysexActive = true;
+                        sysexLen = 0;
+                        sysexBuf[sysexLen++] = b;
+                    }
+                }
+                else
+                {
+                    if (sysexLen < SYSEX_BUF_SIZE)
+                        sysexBuf[sysexLen++] = b;
+
+                    if (b == 0xF7)
+                    {
+                        // Complete SysEx message — check manufacturer ID
+                        if (sysexLen >= 3 && sysexBuf[1] == MIDI_MANUFACTURER_ID)
+                        {
+                            // Strip F0, manufacturer ID, and F7 before processing
+                            process_incoming_sysex(sysexBuf + 2, sysexLen - 3, usb);
+                        }
+                        sysexActive = false;
+                        sysexLen = 0;
+                    }
+                }
+            }
+        }
+
+        // ---- SIDECHAIN DUCKING ----
         // Check if enough samples have elapsed for decimated processing
         uint32_t tick = sc->sample_tick;
         uint32_t elapsed = tick - state.last_tick;
