@@ -2629,11 +2629,10 @@ static void core1_sidechain_entry()
 
 int main()
 {
-    // 200MHz gives ~4167 cycles per 48kHz sample — 39% more budget than
-    // 144MHz (3000 cycles). Needed for tap tempo state machine, fade
-    // envelopes, and multiband compressor without ISR overruns.
-    // Well within RP2040 spec (rated to 133MHz, runs reliably to 250MHz+).
-    set_sys_clock_khz(200000, true);
+    // 192MHz gives ~4000 cycles per 48kHz sample — 33% more budget than
+    // 144MHz (3000 cycles). Clean PLL multiple (12MHz × 16) avoids ADC
+    // tonal artefacts from fractional PLL division.
+    set_sys_clock_khz(192000, true);
 
     // Static allocation — keeps large object off the small RP2040 stack.
     static Robodub robodub;
