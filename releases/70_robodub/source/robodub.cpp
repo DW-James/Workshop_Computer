@@ -2086,10 +2086,9 @@ public:
         // Mono (1 cable in Audio In 1): use left channel directly at full level.
         //   No halving — the signal is already at eurorack level via the
         //   Workshop System's built-in amplifier.
-        // Stereo (cable also in Audio In 2): keep L/R separate, boost ×6
-        //   to bring line-level signals (~±300) up to usable delay levels.
-        //   Line level is typically 5-10× quieter than eurorack.
-        //   ×6 brings ±300 → ±1800, healthy after -2dB headroom cut.
+        // Stereo (cable also in Audio In 2): keep L/R separate, no boost.
+        //   The Workshop System's Stereo In module handles level conversion
+        //   from line-level to eurorack, so both inputs arrive at full scale.
         // Mono (1 cable in Audio In 1): left channel feeds both delay lines.
         int32_t inL = AudioIn1();
         int32_t inR = AudioIn2();
@@ -2098,9 +2097,9 @@ public:
         bool stereoInput = Connected(Input::Audio2);
         if (stereoInput)
         {
-            // Stereo line level: boost each channel ×8, keep separate
-            stereoInL = clamp(inL * 8, -2047, 2047);
-            stereoInR = clamp(inR * 8, -2047, 2047);
+            // Stereo: both channels at eurorack level, keep separate
+            stereoInL = inL;
+            stereoInR = inR;
             // Mono sum for sidechain and sample buffer (they're mono)
             monoIn = clamp((stereoInL + stereoInR) >> 1, -2047, 2047);
         }
@@ -2693,11 +2692,10 @@ public:
         }
 
         // ---- Dry passthrough (end-of-chain mode) ----
-        // In end-of-chain mode, sum the original dry input AFTER ring mod
-        // and multiband compressor. This way the dry signal is uncoloured
-        // by effects processing, and the sidechain compressor (which ducks
-        // the wet signal against the dry) works correctly — it would be
-        // self-defeating to compress the dry signal it's ducking against.
+        // Sum dry input AFTER ring mod and multiband compressor so the
+        // dry signal is completely uncoloured by effects processing.
+        // The sidechain compressor ducks wet against dry — compressing
+        // the dry too would be self-defeating.
         if (dryPassthrough)
         {
             outL += dryL;
@@ -2792,15 +2790,14 @@ public:
         if (sampleTrigFlash > 0) sampleTrigFlash--;
 
         // Input clip indicator: LED 0 lights when the input signal
-        // is near clipping after gain staging. Helps set source level.
-        // Mono: raw ADC near rails (±1950 of ±2047).
-        // Stereo: after ×8 boost, raw ±256 already hits ±2047.
-        //   Threshold 240 ≈ 240×8 = 1920, near the 2047 clamp.
+        // is near clipping. Helps set source level.
+        // Both mono and stereo arrive at eurorack level (no software boost),
+        // so the same threshold works for both: ±1950 of ±2047.
         // Holds for ~100ms so you can see it flash on transients.
         int32_t absInL = inL < 0 ? -inL : inL;
         int32_t absInR = inR < 0 ? -inR : inR;
         int32_t absInPeak = absInL > absInR ? absInL : absInR;
-        int32_t clipThreshold = stereoInput ? 240 : 1950;
+        int32_t clipThreshold = 1950;
         if (absInPeak > clipThreshold) clipHold = 4800;  // ~100ms hold
         if (clipHold > 0) clipHold--;
 
