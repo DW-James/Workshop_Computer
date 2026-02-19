@@ -2575,14 +2575,17 @@ public:
         // Flash LED 3 on sample trigger (not continuous envelope)
         if (sampleTrigFlash > 0) sampleTrigFlash--;
 
-        // Input clip indicator: LED 0 lights when the raw audio input
-        // is near the ADC rails (±1950 of ±2047). This helps with gain
-        // staging — if it's lighting up, turn down your source signal.
+        // Input clip indicator: LED 0 lights when the input signal
+        // is near clipping after gain staging. Helps set source level.
+        // Mono: raw ADC near rails (±1950 of ±2047).
+        // Stereo: after ×8 boost, raw ±256 already hits ±2047.
+        //   Threshold 240 ≈ 240×8 = 1920, near the 2047 clamp.
         // Holds for ~100ms so you can see it flash on transients.
         int32_t absInL = inL < 0 ? -inL : inL;
         int32_t absInR = inR < 0 ? -inR : inR;
         int32_t absInPeak = absInL > absInR ? absInL : absInR;
-        if (absInPeak > 1950) clipHold = 4800;  // ~100ms hold
+        int32_t clipThreshold = stereoInput ? 240 : 1950;
+        if (absInPeak > clipThreshold) clipHold = 4800;  // ~100ms hold
         if (clipHold > 0) clipHold--;
 
         ledCounter++;
