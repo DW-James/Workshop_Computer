@@ -1898,11 +1898,12 @@ public:
 
         // Gate envelope fade-out: when switch leaves Down, ramp the input
         // to silence over 64 samples (~1.3ms) to avoid a click at the cut.
+        // Only ADD to delayInput (don't overwrite sample playback output).
         if (switchPos != Switch::Down && gateEnvelope > 0)
         {
             gateEnvelope--;
-            // Continue feeding fading audio during the ramp-down
-            delayInput = (compressed * gateEnvelope) >> 6;
+            // Mix fading live input on top of whatever delayInput already has
+            delayInput += (compressed * gateEnvelope) >> 6;
         }
 
         // ---- Feedback amount (Main knob, custom curve) ----
