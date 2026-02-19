@@ -12,7 +12,7 @@ You feed it small seeds of your audio signal and they grow, bloom, and get repla
 It's inspired by the Dub-Delay mixing technique, by the lovely feedback-rich Zen Delay pedal and by glitchy sample based effects like Qubit Data Bender or Hologram Microcosm.
 
 **Stereo Tape-style delay**
- The big main knob is the feedback for the delay. Generally speaking, straight up 50% is unity where nothing is lost or gained, to the left the repeats will fade, to the right they will accumulate and bloom.
+ The big main knob is the feedback for the delay. Generally speaking, straight up 50% is unity where nothing is lost or gained, to the left the repeats will fade, to the right they will accumulate and bloom. Each channel has its own slow pitch wobble at a different rate, creating stereo drift like two slightly wonky tape machines. As the feedback increases, occasional random tape glitches (brief pitch hiccups) start to appear — rare at unity, more frequent as you push into bloom territory.
 
 **12 bit crunchy Sample buffer**
 When you send audio into the delay by pushing the toggle switch down, it is also saved as a short, crunchy 12 bit sample in the computer (2 sec mono, 1 sec stereo). Sending a signal into the Pulse 2 input then triggers repeatable playback of this sample into the delay loop, with chance and decoration randomisations dictated by the X knob position. Toggling the switch down at any point adds fresh dry signal to the delay and updates the saved sample.
@@ -49,7 +49,7 @@ Syncs to external clock signal into Pulse 1 input or manual tap tempo
 |----------|-----------|
 | **Down** (momentary) | **Capture + feed.** Hold down to feed audio into the delay. Release to lock the captured sample. |
 | **Middle** | **Sample locked.** Pulse In 2 replays the captured sample - X knob position dictates chance and effects of playback. |
-| **Up** | **Sample Mute switch.** Pulse In 2 is ignored. The delay tail rings out undisturbed. |
+| **Up** | **Sample Mute switch.** Pulse In 2 is ignored. The delay tail rings out undisturbed. Also bypasses the multiband compressor for A/B comparison. |
 
 ### Inputs
 

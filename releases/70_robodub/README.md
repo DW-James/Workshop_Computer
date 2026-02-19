@@ -1,85 +1,71 @@
 # Robodub
 
-A stereo sound expander, ambient backdrop generator, and playable dub instrument.
+**Stereo Sound Expander & Dub Delay**
+For Music Thing Modular Workshop System Computer
 
-Feed in a small mono signal — a synth line, a drum hit, a voice — and Robodub turns it into an evolving stereo soundscape. Part King Tubby dub delay, part digital glitch machine, part ring modulator. Not just another tape delay simulator.
+---
 
-The **sampler** captures and mangles your audio with ratchets, octave-up bursts, and reverse playback. The **tape delay** smears it across stereo with pitch-drifting wow and controllable feedback bloom. The **ring modulator** adds tremolo, warble, or metallic overtones on top. Everything stays immediate and playable — three knobs and a switch.
+Robodub is a fun, playable stereo audio delay effect designed for immediate, hands-on performance. You feed it small seeds of your audio signal and they grow, bloom, and get replayed in various ways to create hypnotic evolving soundscapes. It's inspired by the Dub-Delay mixing technique, by the lovely feedback-rich Zen Delay pedal and by glitchy sample-based effects like Qubit Data Bender or Hologram Microcosm.
 
-**No dry signal passthrough** — designed as a send effect, safe with gear that lacks mixer sends (Deluge, Reface, grooveboxes, etc).
+- **Stereo tape-style delay** with configurable pitch wobble, controllable feedback bloom, and random tape glitches
+- **12 bit crunchy sample buffer** captures and mangles audio with ratchets, octave-up bursts, reverse playback, and two-octave sparkle
+- **Ring mod after-effect** adds tremolo, warble, or metallic overtones — non-destructive to the delay loop
+- **8-band sidechain compressor** dynamically ducks the delay against your dry input so the effect sits in a mix
+- **Clock sync** to external pulse or manual tap tempo
+- **Two routing modes**: insert (wet-only) for mixer sends, or end-of-chain (dry+wet) for standalone use
+- **Web configuration** via USB for signal routing, metronome volume, and tape warble depth
 
 ## Controls
 
 | Control | Function |
 |---------|----------|
-| **Main knob** | Feedback amount. Below halfway: repeats fade. Halfway: sustain. Above: bloom and growth (up to 106%) |
-| **X knob** | Chaos — glitch density and probability (ratchets, octave-up, reverse, two-octave sparkle) |
-| **Y knob** | Ring mod — frequency sweep (1Hz tremolo → 2kHz metallic) with dry signal always present underneath |
-| **Switch Down** | Capture audio AND burst into delay (hold to feed) |
-| **Switch Middle** | Sample locked. Pulse In 2 replays with glitches from X knob |
-| **Switch Up** | Pulse In 2 muted — delay tail rings out undisturbed. Performance kill switch |
-| **Pulse In 1** | Clock input (quarter notes → dotted-eighth delay) |
-| **Pulse In 2** | Trigger input (behaviour depends on switch position) |
-| **CV In 1** | Ring mod FM — modulates the Y knob carrier frequency |
-| **CV In 2** | External chaos control — X knob attenuates incoming CV. Patch a slow LFO for generative glitch swells |
-| **CV Out 1** | Envelope follower on delay output — rhythmic CV that breathes with the delay repeats |
-| **CV Out 2** | Tempo-synced LFO (1 cycle per bar). Free-runs at ~0.5Hz when no clock |
-| **Pulse Out 1** | Bar clock (1 pulse per 4 beats) |
-| **Pulse Out 2** | 16th notes (4× clock rate) |
-| **Audio Out 1+2** | Stereo delay output (wet only) |
+| **Main knob** | Feedback amount. Below halfway: repeats fade. Halfway: sustain (unity). Above: bloom and growth up to 106%. |
+| **X knob** | Chaos — playback density and decoration probability. Ratchets, octave-up, reverse, two-octave sparkle. Effects stack. |
+| **Y knob** | Ring mod — dry/wet mix and frequency sweep from ~1Hz tremolo to ~2kHz metallic. |
+| **Switch Down** | Capture + feed. Hold to feed audio into the delay and save a sample. |
+| **Switch Middle** | Sample locked. Pulse In 2 replays the captured sample with X knob decorations. |
+| **Switch Up** | Sample mute. Pulse In 2 is ignored. Also bypasses the multiband compressor for A/B comparison. |
+| **Audio In 1** | Main audio input (mono eurorack level, or use Amplifier module for instruments/line level). |
+| **Audio In 2** | Stereo right channel. Stereo mode auto-detects. Use Stereo Input module for line-level sources. |
+| **CV In 1** | Ring mod FM — modulates the carrier frequency. |
+| **CV In 2** | Ring mod CV — replaces the Y knob value when patched. Y knob becomes attenuator. |
+| **Pulse In 1** | Clock input. Auto BPM detection. Delay syncs to dotted-eighth note. |
+| **Pulse In 2** | Sample trigger. Behaviour depends on switch position. |
+| **Audio Out 1+2** | Stereo output (delay + ring mod + compressor). In end-of-chain mode, dry signal is summed in clean. |
+| **CV Out 1** | Envelope follower on delay output — rhythmic CV that breathes with the repeats. |
+| **CV Out 2** | Tempo-synced triangle LFO (1 cycle per bar). |
+| **Pulse Out 1** | Bar clock (1 pulse per 4 beats). |
+| **Pulse Out 2** | 16th notes (4 pulses per beat). |
 
-## Chaos Engine (X knob)
+## LEDs
 
-Inspired by Qubit Data Bender and Hologram Microcosm. Turn clockwise for more chaos:
+| LED | Position | Meaning |
+|-----|----------|---------|
+| 0 | Top left | Clip warning — input signal is near clipping |
+| 1 | Top right | Stereo input mode indicator |
+| 2 | Middle left | Pulse In 2 — mirrors incoming pulse |
+| 3 | Middle right | Sample trigger flash |
+| 4 | Bottom left | Pulse In 1 / Clock — mirrors incoming clock |
+| 5 | Bottom right | Output level — brightness tracks delay output; flashes on bar pulse |
 
-| Range | Effect |
-|-------|--------|
-| 0-12% | Clean — no glitches |
-| 12-25% | Occasional ratchets (stutter re-triggers) |
-| 25-50% | Add octave-up bursts (double-speed playback) |
-| 50-75% | Add reverse playback |
-| 75-100% | Two-octave-up sparkle. Full chaos — effects stack randomly |
+## Tap Tempo
 
-Each trigger rolls the dice. A reversed octave-up ratchet is entirely possible.
+No external clock? Flick the switch between Up and Middle three times to enter tap tempo mode, then tap Down six times at your desired tempo. The delay locks to a dotted-eighth note and the pulse outputs start firing. Metronome volume is adjustable via the web config.
 
-## Tape Delay
+## Web Configuration
 
-Clock-syncable stereo delay (dotted-eighth note timing). Each channel has independent tape wow at different rates, creating stereo pitch drift that compounds through the feedback loop — the longer the tail, the woozier it gets. Feedback LPF darkens each repeat like a worn tape head. High-pass filter at 120Hz prevents bass rumble accumulating.
-
-## Ring Modulator (Y knob)
-
-Post-delay character effect. The dry delay signal is always present — the ring mod adds texture on top, never replaces it. Three frequency zones as Y sweeps up: slow tremolo, mid-range warble, metallic ring mod. Patch an LFO or oscillator into CV In 1 for FM modulation of the carrier.
-
-## Sample Buffer
-
-24kHz / 12-bit capture (Akai S900 character). 1.5 seconds maximum. The lo-fi quantisation adds cumulative grit through the delay feedback path — each pass through the sampler degrades the signal further.
-
-## LED Display
-
-| LED | Function |
-|-----|----------|
-| 0 (top left) | Clipping warning (input near ADC rails) |
-| 1 (top right) | Output level (brightness) |
-| 2 (mid left) | Pulse In 2 activity |
-| 3 (mid right) | Sample trigger flash |
-| 4 (bot left) | Pulse In 1 (clock) activity |
-| 5 (bot right) | Bar pulse (beat 1 of each bar) |
-
-## Status
-
-**Current:** Stereo delay with feedback bloom, tape wow, clock sync, sample capture/replay, chaos engine, ring modulator with CV FM.
-
-**Planned:** Web editor for configuration.
+Connect via USB and open `robodub_config.html` in Chrome. Configure signal routing (insert vs end-of-chain), tap tempo metronome volume (1-10), and tape warble depth (5 levels from Clean to Seasick). Settings save to flash and persist across power cycles.
 
 ## Build
 
-Requires Pico SDK. Copy `pico_sdk_import.cmake` into the `source/` directory, then:
+Requires Pico SDK with TinyUSB. From the `source/` directory:
 
 ```
-cd source
 mkdir build && cd build
-cmake ..
-make
+cmake -G Ninja ..
+ninja
 ```
 
-Flash the resulting `robodub.uf2` to a program card.
+Flash the resulting `robodub.uf2` to a Workshop System Computer card.
+
+See `ROBODUB_USER_GUIDE.md` for the full manual.
