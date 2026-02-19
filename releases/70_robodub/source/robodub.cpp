@@ -1801,10 +1801,28 @@ public:
             else if (diff < 0) delayTimeSamples--;
         }
 
-        // ---- Read audio input, sum to mono ----
+        // ---- Read audio input ----
+        // Mono (1 cable in Audio In 1): use left channel directly at full level.
+        //   No halving — the signal is already at eurorack level via the
+        //   Workshop System's built-in amplifier.
+        // Stereo (cable also in Audio In 2): sum to mono with ×3 gain boost
+        //   to bring line-level signals (~±700) up to usable delay levels
+        //   (~±2047). Clamped to prevent overflow.
         int32_t inL = AudioIn1();
         int32_t inR = AudioIn2();
-        int32_t monoIn = (inL + inR) >> 1;
+        int32_t monoIn;
+        bool stereoInput = Connected(Input::Audio2);
+        if (stereoInput)
+        {
+            // Stereo line level: sum and boost ×3
+            int32_t sum = (inL + inR) >> 1;
+            monoIn = clamp(sum * 3, -2047, 2047);
+        }
+        else
+        {
+            // Mono eurorack level: left channel only, full scale
+            monoIn = inL;
+        }
 
         // Write dry input to shared state for core 1 sidechain, then wake it
         sidechain.dry_mono = monoIn;
