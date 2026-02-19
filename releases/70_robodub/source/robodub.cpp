@@ -775,9 +775,9 @@ static constexpr uint8_t  TT_DEFAULT_VOLUME  = 5;
 //   With 2× 32K delay buffers (128KB) + this + code ≈ 248KB of 264KB.
 //   Leaves ~16KB for stack and state — tight but tested.
 
-#define SAMPLE_BUF_SIZE       36000   // 72KB total: 1.5s mono@24kHz or 0.75s stereo@24kHz
-#define SAMPLE_BUF_MONO_MAX   36000   // Max frames in mono mode (1 sample per frame)
-#define SAMPLE_BUF_STEREO_MAX 18000   // Max frames in stereo mode (2 samples per frame)
+#define SAMPLE_BUF_SIZE       48000   // 96KB total: 2.0s mono@24kHz or 1.0s stereo@24kHz
+#define SAMPLE_BUF_MONO_MAX   48000   // Max frames in mono mode (1 sample per frame)
+#define SAMPLE_BUF_STEREO_MAX 24000   // Max frames in stereo mode (2 samples per frame)
 #define MIN_PLAYBACK_SAMPLES  24000   // 0.5s at 48kHz — minimum time a triggered sample plays
 #define MAX_CAPTURE_SAMPLES   96000   // 2.0s at 48kHz — maximum gate-open time for capture in Up mode
 
