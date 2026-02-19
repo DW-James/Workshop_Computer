@@ -681,9 +681,9 @@ static volatile SharedSidechain *g_sidechain = nullptr;
 // ============================================================================
 // Tap tempo — manual BPM entry via switch gestures
 // ============================================================================
-// Entry: 4 rapid Up<->Middle switch flicks within 3 seconds.
+// Entry: 3 rapid Up<->Middle switch flicks within 2 seconds.
 // Plays a "Tap Tempo" announcement, then collects 6 taps (Switch::Down).
-// Averages 5 intervals, normalises BPM to 60-200 range, converts to
+// Averages 5 intervals, normalises BPM to usable range, converts to
 // dotted-eighth delay time. Switch::Up during tapping aborts/restarts.
 // External clock arriving on Pulse In 1 overrides tap tempo.
 
@@ -739,8 +739,8 @@ static constexpr uint8_t TT_SEQ_CONFIRM_LEN = 3;
 
 // Flick detection constants
 static constexpr uint32_t TT_FLICK_DEBOUNCE  = 240;     // 5ms debounce lockout
-static constexpr uint32_t TT_FLICK_WINDOW    = 144000;  // 3-second window
-static constexpr uint8_t  TT_FLICKS_REQUIRED = 4;       // Up<->Middle flicks to enter
+static constexpr uint32_t TT_FLICK_WINDOW    = 96000;   // 2-second window
+static constexpr uint8_t  TT_FLICKS_REQUIRED = 3;       // Up<->Middle flicks to enter
 
 // Tap collection
 static constexpr uint8_t  TT_TAPS_REQUIRED   = 6;
@@ -1357,7 +1357,7 @@ class Robodub : public ComputerCard
 
     // Gesture detection
     int32_t  ttLastSwitchForFlick;   // Previous switch position for edge detection
-    uint32_t ttFlickTimestamps[4];   // Ring buffer of last 4 flick timestamps
+    uint32_t ttFlickTimestamps[3];   // Ring buffer of last 3 flick timestamps
     uint8_t  ttFlickCount;           // Number of valid flicks in window
     uint32_t ttFlickDebounce;        // Debounce countdown (samples)
     uint32_t ttSampleCounter;        // Global sample counter for timestamps
@@ -1771,7 +1771,7 @@ public:
         ttFlickCount = 0;
         ttFlickDebounce = 0;
         ttSampleCounter = 0;
-        for (int i = 0; i < 4; i++) ttFlickTimestamps[i] = 0;
+        for (int i = 0; i < 3; i++) ttFlickTimestamps[i] = 0;
         ttTonePhase = 0;
         ttTonePhaseInc = 0;
         ttToneTimer = 0;
