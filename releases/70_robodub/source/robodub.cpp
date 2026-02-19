@@ -1051,7 +1051,12 @@ static inline void samplebuf_trigger_play(SampleBuffer *sb)
 
         sb->playing = true;
         sb->playbackTimer = 0;
-        sb->fadeInCounter = 0;  // Start fade-in ramp from silence
+        // Fade-in from silence — but skip if retrigger crossfade is active,
+        // since the crossfade already handles the smooth transition.
+        if (sb->fadeOutCounter == 0)
+            sb->fadeInCounter = 0;
+        else
+            sb->fadeInCounter = 64;  // Already faded in (crossfade handles it)
     }
 }
 
