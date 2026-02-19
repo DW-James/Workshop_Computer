@@ -1676,6 +1676,12 @@ class Robodub : public ComputerCard
         case TT_EXIT:
             // clockPeriod and delayTimeSamples already set by tt_calculate_tempo().
             // tapTempoLocked already true. Just return to normal.
+            // Reset clock counter so the internal clock starts cleanly from
+            // this moment — first virtual beat fires one clockPeriod from now.
+            // Bar counter resets so Pulse Out 1 fires on the 4th beat after exit.
+            clockCounter = 0;
+            barCounter = 0;
+            beatCounter = 0;
             ttState = TT_OFF;
             ttTonePhaseInc = 0;
             break;
