@@ -2148,8 +2148,14 @@ public:
         // so we only need a hint of cross-feed on top of that.
         // Total loop gain contribution: ~103% — close enough to unity
         // that the feedback LUT doesn't need to compensate.
-        int32_t writeL = clamp(delayInput + feedbackL + (feedbackR >> 5), -2047, 2047);
-        int32_t writeR = clamp(delayInput + feedbackR + (feedbackL >> 5), -2047, 2047);
+        // Input is attenuated by -6dB (÷2) to leave headroom for feedback.
+        // Without this, a hot input + sustained feedback both near ±2047
+        // sum to ±4094 and hard-clip, causing audible digital distortion.
+        // The delay output level is set by the feedback amount, not the
+        // input level, so the perceived volume is barely affected.
+        int32_t inputScaled = delayInput >> 1;
+        int32_t writeL = clamp(inputScaled + feedbackL + (feedbackR >> 5), -2047, 2047);
+        int32_t writeR = clamp(inputScaled + feedbackR + (feedbackL >> 5), -2047, 2047);
         delay_write(&delayL, (int16_t)writeL);
         delay_write(&delayR, (int16_t)writeR);
 
