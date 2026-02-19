@@ -775,23 +775,29 @@ static constexpr uint8_t  TT_DEFAULT_VOLUME  = 5;
 //   With 2× 32K delay buffers (128KB) + this + code ≈ 248KB of 264KB.
 //   Leaves ~16KB for stack and state — tight but tested.
 
-#define SAMPLE_BUF_SIZE       36000   // 1.5 seconds at 24kHz = 72KB
+#define SAMPLE_BUF_SIZE       36000   // 72KB total: 1.5s mono@24kHz or 0.75s stereo@24kHz
+#define SAMPLE_BUF_MONO_MAX   36000   // Max frames in mono mode (1 sample per frame)
+#define SAMPLE_BUF_STEREO_MAX 18000   // Max frames in stereo mode (2 samples per frame)
 #define MIN_PLAYBACK_SAMPLES  24000   // 0.5s at 48kHz — minimum time a triggered sample plays
 #define MAX_CAPTURE_SAMPLES   96000   // 2.0s at 48kHz — maximum gate-open time for capture in Up mode
 
 struct SampleBuffer
 {
     int16_t *data;             // Heap-allocated — 72KB too large for stack!
-    uint32_t writePos;         // Write index (in 24kHz samples)
-    uint32_t length;           // Length of captured sample (in 24kHz samples)
-    uint32_t playPos;          // Read index (in 24kHz samples)
+    uint32_t writePos;         // Write index (in frames: 1 frame = 1 mono or 1 L+R pair)
+    uint32_t length;           // Length of captured sample (in frames)
+    uint32_t playPos;          // Read index (in frames)
+    uint32_t maxFrames;        // SAMPLE_BUF_MONO_MAX or SAMPLE_BUF_STEREO_MAX
+    bool     stereo;           // True = interleaved L/R, false = mono
     bool     skipToggle;       // Alternates each 48kHz call for 2:1 downsample
     bool     playToggle;       // Alternates each 48kHz call for 1:2 upsample
     bool     capturing;
     bool     playing;
     bool     hasContent;
-    int16_t  lastPlaySample;   // Previous output sample (for interpolation)
-    int16_t  nextPlaySample;   // Next output sample (for interpolation)
+    int16_t  lastPlayL;        // Previous output sample L (for interpolation)
+    int16_t  nextPlayL;        // Next output sample L (for interpolation)
+    int16_t  lastPlayR;        // Previous output sample R (stereo interpolation)
+    int16_t  nextPlayR;        // Next output sample R (stereo interpolation)
 
     // --- Chaos / Data Bender-style glitch state ---
     // These get rolled on each trigger from Pulse In 2.
@@ -811,7 +817,8 @@ struct SampleBuffer
     // is still outputting, we fade out the old value over ~1.3ms (64 samples)
     // to avoid a hard discontinuity click at the splice point.
     // Power-of-2 length (64) so the fade uses shifts instead of division.
-    int32_t  fadeOutValue;     // Value to fade from (captured at retrigger)
+    int32_t  fadeOutValueL;    // Value to fade from (captured at retrigger)
+    int32_t  fadeOutValueR;    // Right channel fade-out value
     int32_t  fadeOutCounter;   // Counts down from 64 → 0
 
     // Fade-in on playback start: ramps from 0 to full over 64 samples (~1.3ms).
@@ -829,72 +836,89 @@ static void samplebuf_init(SampleBuffer *sb)
     sb->writePos = 0;
     sb->length = 0;
     sb->playPos = 0;
+    sb->maxFrames = SAMPLE_BUF_MONO_MAX;
+    sb->stereo = false;
     sb->skipToggle = false;
     sb->playToggle = false;
     sb->capturing = false;
     sb->playing = false;
     sb->hasContent = false;
-    sb->lastPlaySample = 0;
-    sb->nextPlaySample = 0;
+    sb->lastPlayL = 0;
+    sb->nextPlayL = 0;
+    sb->lastPlayR = 0;
+    sb->nextPlayR = 0;
     sb->playSpeed = 1;
     sb->reverse = false;
     sb->ratchetCountdown = 0;
     sb->playbackTimer = 0;
     sb->captureTimer = 0;
-    sb->fadeOutValue = 0;
+    sb->fadeOutValueL = 0;
+    sb->fadeOutValueR = 0;
     sb->fadeOutCounter = 0;
     sb->fadeInCounter = 64;  // Start fully faded in (no ramp on init)
 }
 
 // Called every 48kHz sample during capture.
 // Only actually writes every other call (24kHz effective rate).
-// The 24kHz rate + 12-bit ADC already provides plenty of lo-fi
-// character without additional bit-crushing.
-static inline void __not_in_flash_func(samplebuf_write)(SampleBuffer *sb, int16_t sample)
+// In stereo mode, writes L+R interleaved (2 int16_t per frame).
+// In mono mode, writes 1 int16_t per frame.
+static inline void __not_in_flash_func(samplebuf_write)(SampleBuffer *sb, int16_t sampleL, int16_t sampleR)
 {
     sb->skipToggle = !sb->skipToggle;
     if (!sb->skipToggle) return;  // Skip odd samples → 24kHz
 
-    if (sb->writePos < SAMPLE_BUF_SIZE)
+    if (sb->writePos < sb->maxFrames)
     {
-        sb->data[sb->writePos] = sample;
+        if (sb->stereo)
+        {
+            uint32_t idx = sb->writePos << 1;  // 2 samples per frame
+            sb->data[idx]     = sampleL;
+            sb->data[idx + 1] = sampleR;
+        }
+        else
+        {
+            sb->data[sb->writePos] = sampleL;  // sampleR ignored in mono
+        }
         sb->writePos++;
         sb->length = sb->writePos;
     }
 }
 
 // Called every 48kHz sample during playback.
-// Reads a new 24kHz sample every other call, interpolates between them
+// Reads a new 24kHz frame every other call, interpolates between them
 // to produce a smooth-ish 48kHz output.
+// Returns L and R through pointers. In mono mode, both get the same value.
 //
 // Supports variable speed and reverse via the chaos system:
 //   playSpeed=1: normal 24kHz playback (skip every other 48kHz call)
 //   playSpeed=2: octave-up — read a new sample every 48kHz call (no skip)
-//                This halves the playback time and raises pitch by one octave.
 //   reverse=true: reads from the end of the buffer toward the start.
 //
-static inline int16_t __not_in_flash_func(samplebuf_read)(SampleBuffer *sb)
+static inline void __not_in_flash_func(samplebuf_read)(SampleBuffer *sb, int16_t *outL, int16_t *outR)
 {
     // Crossfade: if we're fading out a previous playback, blend it in
     // even if the new playback hasn't started yet. This ensures clicks
     // from retrigger are always smoothed.
-    int32_t fadeContrib = 0;
+    int32_t fadeContribL = 0, fadeContribR = 0;
     if (sb->fadeOutCounter > 0)
     {
         // Linear fade: value × (counter/64) using shift instead of division
-        fadeContrib = (sb->fadeOutValue * sb->fadeOutCounter) >> 6;
+        fadeContribL = (sb->fadeOutValueL * sb->fadeOutCounter) >> 6;
+        fadeContribR = (sb->fadeOutValueR * sb->fadeOutCounter) >> 6;
         sb->fadeOutCounter--;
     }
 
-    if (!sb->playing || sb->length == 0) return (int16_t)fadeContrib;
+    if (!sb->playing || sb->length == 0)
+    {
+        *outL = (int16_t)fadeContribL;
+        *outR = (int16_t)fadeContribR;
+        return;
+    }
 
     // Track how long we've been playing (at 48kHz)
     sb->playbackTimer++;
 
     // Check if we've reached the end of the sample data.
-    // DON'T loop — just output silence for the rest of the minimum
-    // playback window. Looping caused crackly clicks at each loop
-    // splice and sounded unmusical.
     bool reachedEnd = false;
     if (!sb->reverse && sb->playPos >= sb->length)
         reachedEnd = true;
@@ -905,15 +929,16 @@ static inline int16_t __not_in_flash_func(samplebuf_read)(SampleBuffer *sb)
     {
         if (sb->playbackTimer >= MIN_PLAYBACK_SAMPLES)
             sb->playing = false;
-        // Either way, output silence (just the fade contribution if any)
-        return (int16_t)fadeContrib;
+        *outL = (int16_t)fadeContribL;
+        *outR = (int16_t)fadeContribR;
+        return;
     }
 
     // Playback speed:
     //   speed 1: normal (24kHz → 48kHz via interpolation toggle)
     //   speed 2: octave-up (read a new sample every 48kHz call)
     //   speed 4: two-octaves-up (skip a sample each call = 4× speed)
-    int32_t rawSample;
+    int32_t rawL, rawR;
 
     if (sb->playSpeed == 1)
     {
@@ -922,42 +947,64 @@ static inline int16_t __not_in_flash_func(samplebuf_read)(SampleBuffer *sb)
         if (sb->playToggle)
         {
             // Odd samples: interpolate halfway between last and next
-            rawSample = ((int32_t)sb->lastPlaySample + (int32_t)sb->nextPlaySample) >> 1;
+            rawL = ((int32_t)sb->lastPlayL + (int32_t)sb->nextPlayL) >> 1;
+            rawR = ((int32_t)sb->lastPlayR + (int32_t)sb->nextPlayR) >> 1;
             goto apply_envelopes;
         }
     }
 
-    // Advance to next sample
-    sb->lastPlaySample = sb->nextPlaySample;
+    // Advance to next frame
+    sb->lastPlayL = sb->nextPlayL;
+    sb->lastPlayR = sb->nextPlayR;
 
     if (sb->reverse)
     {
         if (sb->playPos > 0)
         {
             sb->playPos--;
-            sb->nextPlaySample = sb->data[sb->playPos];
+            if (sb->stereo)
+            {
+                uint32_t idx = sb->playPos << 1;
+                sb->nextPlayL = sb->data[idx];
+                sb->nextPlayR = sb->data[idx + 1];
+            }
+            else
+            {
+                sb->nextPlayL = sb->data[sb->playPos];
+                sb->nextPlayR = sb->nextPlayL;
+            }
         }
         else
         {
-            sb->nextPlaySample = 0;
+            sb->nextPlayL = 0;
+            sb->nextPlayR = 0;
         }
     }
     else
     {
         if (sb->playPos < sb->length)
         {
-            sb->nextPlaySample = sb->data[sb->playPos];
+            if (sb->stereo)
+            {
+                uint32_t idx = sb->playPos << 1;
+                sb->nextPlayL = sb->data[idx];
+                sb->nextPlayR = sb->data[idx + 1];
+            }
+            else
+            {
+                sb->nextPlayL = sb->data[sb->playPos];
+                sb->nextPlayR = sb->nextPlayL;
+            }
             sb->playPos++;
         }
         else
         {
-            sb->nextPlaySample = 0;
+            sb->nextPlayL = 0;
+            sb->nextPlayR = 0;
         }
     }
 
-    // Two-octaves-up: skip an extra sample to double the advance rate.
-    // Combined with speed >= 2 (no toggle), this gives 4× playback speed
-    // = two octaves above the original pitch.
+    // Two-octaves-up: skip an extra frame to double the advance rate.
     if (sb->playSpeed >= 4)
     {
         if (sb->reverse)
@@ -970,19 +1017,19 @@ static inline int16_t __not_in_flash_func(samplebuf_read)(SampleBuffer *sb)
         }
     }
 
-    rawSample = (int32_t)sb->lastPlaySample;
+    rawL = (int32_t)sb->lastPlayL;
+    rawR = (int32_t)sb->lastPlayR;
 
 apply_envelopes:
     // Fade-in: ramp from silence over 64 samples (~1.3ms) at playback start
     if (sb->fadeInCounter < 64)
     {
         sb->fadeInCounter++;
-        rawSample = (rawSample * sb->fadeInCounter) >> 6;
+        rawL = (rawL * sb->fadeInCounter) >> 6;
+        rawR = (rawR * sb->fadeInCounter) >> 6;
     }
 
-    // Fade-out near end of sample: ramp to silence over last 64 samples.
-    // Prevents clicks when the sample data ends at a non-zero value.
-    // Uses distance-to-end in 24kHz sample positions.
+    // Fade-out near end of sample: ramp to silence over last 64 frames.
     {
         uint32_t samplesLeft;
         if (sb->reverse)
@@ -990,22 +1037,30 @@ apply_envelopes:
         else
             samplesLeft = (sb->playPos < sb->length) ? (sb->length - sb->playPos) : 0;
         if (samplesLeft < 64)
-            rawSample = (rawSample * (int32_t)samplesLeft) >> 6;
+        {
+            rawL = (rawL * (int32_t)samplesLeft) >> 6;
+            rawR = (rawR * (int32_t)samplesLeft) >> 6;
+        }
     }
 
     // Retrigger crossfade: blend old playback out, new playback in
     if (sb->fadeOutCounter > 0)
     {
-        int32_t fadeIn = (rawSample * (64 - sb->fadeOutCounter)) >> 6;
-        return (int16_t)(fadeIn + fadeContrib);
+        int32_t mul = 64 - sb->fadeOutCounter;
+        *outL = (int16_t)(((rawL * mul) >> 6) + fadeContribL);
+        *outR = (int16_t)(((rawR * mul) >> 6) + fadeContribR);
+        return;
     }
-    return (int16_t)rawSample;
+    *outL = (int16_t)rawL;
+    *outR = (int16_t)rawR;
 }
 
-static inline void samplebuf_start_capture(SampleBuffer *sb)
+static inline void samplebuf_start_capture(SampleBuffer *sb, bool stereo)
 {
     sb->writePos = 0;
     sb->length = 0;
+    sb->stereo = stereo;
+    sb->maxFrames = stereo ? SAMPLE_BUF_STEREO_MAX : SAMPLE_BUF_MONO_MAX;
     sb->skipToggle = false;
     sb->capturing = true;
     sb->hasContent = false;
@@ -1029,11 +1084,10 @@ static inline void samplebuf_trigger_play(SampleBuffer *sb)
     if (sb->hasContent && sb->length > 0)
     {
         // If already playing, capture the current output for crossfade.
-        // The last interpolated value is a good approximation of what
-        // was just being output.
         if (sb->playing)
         {
-            sb->fadeOutValue = (int32_t)sb->lastPlaySample;
+            sb->fadeOutValueL = (int32_t)sb->lastPlayL;
+            sb->fadeOutValueR = (int32_t)sb->lastPlayR;
             sb->fadeOutCounter = 64;  // ~1.3ms at 48kHz (power-of-2 for fast math)
         }
 
@@ -1043,15 +1097,36 @@ static inline void samplebuf_trigger_play(SampleBuffer *sb)
         {
             // Start from end, walk backward
             sb->playPos = sb->length - 1;
-            sb->lastPlaySample = 0;
-            sb->nextPlaySample = sb->data[sb->playPos];
+            sb->lastPlayL = 0;
+            sb->lastPlayR = 0;
+            if (sb->stereo)
+            {
+                uint32_t idx = sb->playPos << 1;
+                sb->nextPlayL = sb->data[idx];
+                sb->nextPlayR = sb->data[idx + 1];
+            }
+            else
+            {
+                sb->nextPlayL = sb->data[sb->playPos];
+                sb->nextPlayR = sb->nextPlayL;
+            }
         }
         else
         {
             // Normal: start from beginning
             sb->playPos = 0;
-            sb->lastPlaySample = 0;
-            sb->nextPlaySample = sb->data[0];
+            sb->lastPlayL = 0;
+            sb->lastPlayR = 0;
+            if (sb->stereo)
+            {
+                sb->nextPlayL = sb->data[0];
+                sb->nextPlayR = sb->data[1];
+            }
+            else
+            {
+                sb->nextPlayL = sb->data[0];
+                sb->nextPlayR = sb->nextPlayL;
+            }
         }
 
         sb->playing = true;
@@ -1818,9 +1893,9 @@ public:
         bool stereoInput = Connected(Input::Audio2);
         if (stereoInput)
         {
-            // Stereo line level: boost each channel ×6, keep separate
-            stereoInL = clamp(inL * 6, -2047, 2047);
-            stereoInR = clamp(inR * 6, -2047, 2047);
+            // Stereo line level: boost each channel ×8, keep separate
+            stereoInL = clamp(inL * 8, -2047, 2047);
+            stereoInR = clamp(inR * 8, -2047, 2047);
             // Mono sum for sidechain and sample buffer (they're mono)
             monoIn = clamp((stereoInL + stereoInR) >> 1, -2047, 2047);
         }
@@ -1844,8 +1919,6 @@ public:
         // In mono mode both get the same signal (stereoInL == stereoInR).
         int32_t filteredL = filter_hp(&inputHPF, 684, stereoInL);
         int32_t filteredR = filter_hp(&inputHPF_R, 684, stereoInR);
-        // Mono path for sample buffer uses left (same as mono in mono mode)
-        int32_t filtered = filteredL;
 
         // No compressor — previous attempts caused ISR timing overruns
         // on M0+ (no hardware divider). Signal path is clean without it.
@@ -1880,11 +1953,11 @@ public:
             // feed audio directly to the delay while held
             if (!lastSwitchDown)
             {
-                samplebuf_start_capture(&sampleBuf);
+                samplebuf_start_capture(&sampleBuf, stereoInput);
                 sampleTrigFlash = 4800;  // Flash LED 3 on capture start
             }
-            // Sample buffer captures mono (left channel / mono sum)
-            if (sampleBuf.capturing) samplebuf_write(&sampleBuf, (int16_t)filtered);
+            // Capture L/R in stereo mode, or just L in mono
+            if (sampleBuf.capturing) samplebuf_write(&sampleBuf, (int16_t)filteredL, (int16_t)filteredR);
             // Fade-in: ramp gate envelope up over 64 samples (~1.3ms)
             if (gateEnvelope < 64) gateEnvelope++;
             // Feed stereo L/R to delay (in mono mode, filteredL == filteredR)
@@ -1913,10 +1986,11 @@ public:
                     sampleTrigFlash = 4800;  // ~100ms flash for LED 3
                 }
             }
-            // Sample playback is mono — feeds both delay channels equally
-            int32_t sampleOut = samplebuf_read(&sampleBuf);
-            delayInputL = sampleOut;
-            delayInputR = sampleOut;
+            // Sample playback: stereo if captured in stereo, mono otherwise
+            int16_t sampleOutL, sampleOutR;
+            samplebuf_read(&sampleBuf, &sampleOutL, &sampleOutR);
+            delayInputL = sampleOutL;
+            delayInputR = sampleOutR;
         }
         else // Switch::Up
         {
