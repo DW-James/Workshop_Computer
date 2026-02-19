@@ -196,6 +196,60 @@
         padding: 0 20px;
         line-height: 1.5;
       }
+
+      /* Sliders */
+      .slider-row {
+        padding: 8px 0;
+      }
+
+      .slider-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-bottom: 8px;
+      }
+
+      .slider-label {
+        font-size: 14px;
+        color: #e0e0e0;
+      }
+
+      .slider-value {
+        font-size: 13px;
+        color: #ff6b35;
+        font-weight: bold;
+      }
+
+      .slider-labels {
+        display: flex;
+        justify-content: space-between;
+        font-size: 10px;
+        color: #666;
+        margin-top: 4px;
+      }
+
+      input[type="range"] {
+        -webkit-appearance: none;
+        width: 100%;
+        height: 6px;
+        background: #333;
+        border-radius: 3px;
+        outline: none;
+      }
+
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 20px;
+        height: 20px;
+        background: #ff6b35;
+        border-radius: 50%;
+        cursor: pointer;
+      }
+
+      input[type="range"]:disabled::-webkit-slider-thumb {
+        background: #555;
+        cursor: not-allowed;
+      }
     </style>
 
     <script>
@@ -294,11 +348,13 @@
       ////////////////////////////////////////////////////////////
       // Robodub-specific protocol
 
-      const SYSEX_SET_DRY_PASSTHROUGH = 0x01;
-      const SYSEX_SAVE_TO_FLASH       = 0x02;
-      const SYSEX_REQUEST_CONFIG       = 0x03;
-      const SYSEX_CONFIG_STATE         = 0x04;
-      const SYSEX_FIRMWARE_VERSION     = 0x10;
+      const SYSEX_SET_DRY_PASSTHROUGH  = 0x01;
+      const SYSEX_SAVE_TO_FLASH        = 0x02;
+      const SYSEX_REQUEST_CONFIG        = 0x03;
+      const SYSEX_CONFIG_STATE          = 0x04;
+      const SYSEX_SET_METRONOME_VOLUME  = 0x05;
+      const SYSEX_SET_WARBLE_LEVEL      = 0x06;
+      const SYSEX_FIRMWARE_VERSION      = 0x10;
 
       var firmwareMajor = 0, firmwareMinor = 0, firmwarePatch = 0;
 
@@ -327,17 +383,35 @@
       function enableControls(enabled)
       {
         document.getElementById('dryPassthroughToggle').disabled = !enabled;
+        document.getElementById('metronomeSlider').disabled = !enabled;
+        document.getElementById('warbleSlider').disabled = !enabled;
         document.getElementById('saveBtn').disabled = !enabled;
       }
 
       function ProcessIncomingSysEx(dataBytes)
       {
-        if (dataBytes[0] === SYSEX_CONFIG_STATE && dataBytes.length === 2)
+        if (dataBytes[0] === SYSEX_CONFIG_STATE && dataBytes.length >= 2)
         {
           // Update toggle to match firmware state
           var dryPassthrough = dataBytes[1] !== 0;
           document.getElementById('dryPassthroughToggle').checked = dryPassthrough;
           updateModeLabels(dryPassthrough);
+
+          // Metronome volume (1-10)
+          if (dataBytes.length >= 3)
+          {
+            var vol = dataBytes[2];
+            document.getElementById('metronomeSlider').value = vol;
+            document.getElementById('metronomeValue').textContent = vol;
+          }
+
+          // Warble level (1-5)
+          if (dataBytes.length >= 4)
+          {
+            var warble = dataBytes[3];
+            document.getElementById('warbleSlider').value = warble;
+            updateWarbleLabel(warble);
+          }
         }
 
         if (dataBytes[0] === SYSEX_FIRMWARE_VERSION && dataBytes.length === 4)
@@ -385,6 +459,28 @@
         }
       }
 
+      var warbleLabels = ['Clean', 'Subtle', 'Moderate', 'Woozy', 'Seasick'];
+
+      function onMetronomeChange()
+      {
+        var val = parseInt(document.getElementById('metronomeSlider').value);
+        document.getElementById('metronomeValue').textContent = val;
+        SendSysEx([SYSEX_SET_METRONOME_VOLUME, val]);
+      }
+
+      function onWarbleChange()
+      {
+        var val = parseInt(document.getElementById('warbleSlider').value);
+        updateWarbleLabel(val);
+        SendSysEx([SYSEX_SET_WARBLE_LEVEL, val]);
+      }
+
+      function updateWarbleLabel(val)
+      {
+        document.getElementById('warbleValue').textContent =
+          val + '/5 — ' + warbleLabels[val - 1];
+      }
+
       function updateVersionDisplay()
       {
         var el = document.getElementById('versionInfo');
@@ -426,6 +522,41 @@
             <span class="toggle-slider"></span>
           </label>
           <span id="endChainLabel" class="toggle-label inactive">End-of-chain</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Tap Tempo Metronome</h2>
+        <p>Volume of the metronome tones during tap tempo entry.</p>
+        <div class="slider-row">
+          <div class="slider-header">
+            <span class="slider-label">Volume</span>
+            <span id="metronomeValue" class="slider-value">7</span>
+          </div>
+          <input type="range" id="metronomeSlider" min="1" max="10" value="7"
+                 disabled oninput="onMetronomeChange()">
+          <div class="slider-labels">
+            <span>Quiet</span>
+            <span>Loud</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Tape Warble</h2>
+        <p>Amount of pitch wobble on the delay repeats.
+           Higher levels compound through the feedback loop.</p>
+        <div class="slider-row">
+          <div class="slider-header">
+            <span class="slider-label">Warble</span>
+            <span id="warbleValue" class="slider-value">4/5 — Woozy</span>
+          </div>
+          <input type="range" id="warbleSlider" min="1" max="5" value="4"
+                 disabled oninput="onWarbleChange()">
+          <div class="slider-labels">
+            <span>Clean</span>
+            <span>Seasick</span>
+          </div>
         </div>
       </div>
 

@@ -123,7 +123,9 @@ struct __attribute__((packed)) RobodubConfig
     uint32_t magic;             // Must be ROBODUB_CONFIG_MAGIC
     uint8_t  version;           // Struct version (for future migration)
     uint8_t  dryPassthrough;    // 0=insert (wet only), 1=end-of-chain (wet+dry)
-    uint8_t  reserved[250];     // Padding to 256 bytes (future settings)
+    uint8_t  metronomeVolume;   // 1-10 (default 7)
+    uint8_t  warbleLevel;       // 1-5 (default 4)
+    uint8_t  reserved[248];     // Padding to 256 bytes (future settings)
 };
 
 static_assert(sizeof(RobodubConfig) == 256, "Config must be exactly one flash page");
@@ -182,6 +184,8 @@ static void config_defaults(RobodubConfig *cfg)
     cfg->magic = ROBODUB_CONFIG_MAGIC;
     cfg->version = 1;
     cfg->dryPassthrough = 0;  // Insert mode (wet only) by default
+    cfg->metronomeVolume = 7; // 1-10, default 7
+    cfg->warbleLevel = 4;     // 1-5, default 4
 }
 
 
@@ -203,11 +207,13 @@ static constexpr uint8_t ROBODUB_VERSION_MINOR = 9;
 static constexpr uint8_t ROBODUB_VERSION_PATCH = 0;
 
 // SysEx message IDs
-static constexpr uint8_t SYSEX_SET_DRY_PASSTHROUGH = 0x01; // web → firmware: [0x01, 0|1]
-static constexpr uint8_t SYSEX_SAVE_TO_FLASH       = 0x02; // web → firmware: [0x02]
-static constexpr uint8_t SYSEX_REQUEST_CONFIG       = 0x03; // web → firmware: [0x03]
-static constexpr uint8_t SYSEX_CONFIG_STATE         = 0x04; // firmware → web: [0x04, dryPassthrough]
-static constexpr uint8_t SYSEX_FIRMWARE_VERSION     = 0x10; // firmware → web: [0x10, maj, min, patch]
+static constexpr uint8_t SYSEX_SET_DRY_PASSTHROUGH  = 0x01; // web → firmware: [0x01, 0|1]
+static constexpr uint8_t SYSEX_SAVE_TO_FLASH        = 0x02; // web → firmware: [0x02]
+static constexpr uint8_t SYSEX_REQUEST_CONFIG        = 0x03; // web → firmware: [0x03]
+static constexpr uint8_t SYSEX_CONFIG_STATE          = 0x04; // firmware → web: [0x04, dryPassthrough, metroVol, warbleLevel]
+static constexpr uint8_t SYSEX_SET_METRONOME_VOLUME  = 0x05; // web → firmware: [0x05, 1-10]
+static constexpr uint8_t SYSEX_SET_WARBLE_LEVEL      = 0x06; // web → firmware: [0x06, 1-5]
+static constexpr uint8_t SYSEX_FIRMWARE_VERSION      = 0x10; // firmware → web: [0x10, maj, min, patch]
 
 // SysEx parsing buffer (512 bytes max, same as web_interface example)
 static constexpr unsigned SYSEX_BUF_SIZE = 512;
@@ -803,6 +809,8 @@ struct SidechainState {
 // flag without needing access to the Robodub class.
 struct SharedUSBState {
     volatile bool *dryPassthroughPtr;   // Points to Robodub::dryPassthrough
+    volatile uint8_t *metronomeVolPtr;  // Points to Robodub::ttMetronomeVolume
+    volatile int32_t *wowDepthMulPtr;   // Points to Robodub::wowDepthMul
     RobodubConfig *configPtr;           // Points to Robodub::config (for save)
 };
 
@@ -885,8 +893,8 @@ static constexpr uint8_t  TT_TAPS_REQUIRED   = 6;
 static constexpr uint32_t TT_INACTIVITY_MAX  = 480000;  // 10 seconds
 
 // Metronome volume: amplitude = sine_lookup * (vol * 205) >> 12
-// At vol=5: peak ≈ 1025 (quarter of DAC range)
-static constexpr uint8_t  TT_DEFAULT_VOLUME  = 5;
+// At vol=7: peak ≈ 1435 (~35% of DAC range)
+static constexpr uint8_t  TT_DEFAULT_VOLUME  = 7;
 
 
 // ============================================================================
@@ -1433,6 +1441,16 @@ class Robodub : public ComputerCard
     // so the average delay time stays on-tempo.
     uint32_t wowPhaseL;        // 32-bit phase accumulator, left channel
     uint32_t wowPhaseR;        // 32-bit phase accumulator, right channel
+    int32_t  wowDepthMul;      // Wow depth multiplier (set from warbleLevel config)
+
+    // Warble level → wow depth multiplier lookup.
+    // sine_lookup returns ±4096. Multiply by this value to get depth in 16.16 samples.
+    // Level 1 (clean):  ×256  → ±16 samples = ±0.33ms ≈ ±6 cents  (barely perceptible)
+    // Level 2 (subtle):  ×768  → ±48 samples = ±1.0ms  ≈ ±13 cents (gentle chorusing)
+    // Level 3 (moderate): ×1280 → ±80 samples = ±1.67ms ≈ ±18 cents (warm wobble)
+    // Level 4 (woozy):   ×2048 → ±128 samples = ±2.67ms ≈ ±29 cents (current default)
+    // Level 5 (seasick): ×3072 → ±192 samples = ±4.0ms  ≈ ±43 cents (extreme)
+    static constexpr int32_t WARBLE_DEPTH_LUT[5] = { 256, 768, 1280, 2048, 3072 };
 
     // --- Tape glitch (random transport irregularities) ---
     // Models occasional tape slips, sticky capstans, worn rollers —
@@ -1865,7 +1883,15 @@ public:
         {
             config_defaults(&config);
         }
+        // Validate and clamp loaded values (guards against corrupt flash)
+        if (config.metronomeVolume < 1 || config.metronomeVolume > 10)
+            config.metronomeVolume = 7;
+        if (config.warbleLevel < 1 || config.warbleLevel > 5)
+            config.warbleLevel = 4;
+
         dryPassthrough = (config.dryPassthrough != 0);
+        ttMetronomeVolume = config.metronomeVolume;
+        wowDepthMul = WARBLE_DEPTH_LUT[config.warbleLevel - 1];
         dryL = 0;
         dryR = 0;
         filter_init(&inputHPF);
@@ -1942,6 +1968,8 @@ public:
 
         // USB MIDI state — pointers into this class for core 1 SysEx handler
         usbState.dryPassthroughPtr = &dryPassthrough;
+        usbState.metronomeVolPtr = &ttMetronomeVolume;
+        usbState.wowDepthMulPtr = &wowDepthMul;
         usbState.configPtr = &config;
         g_usb_state = &usbState;
 
@@ -1966,7 +1994,7 @@ public:
         ttLedFlashTimer = 0;
         ttTappedInterval = 0;
         ttInactivityTimer = 0;
-        ttMetronomeVolume = TT_DEFAULT_VOLUME;
+        ttMetronomeVolume = config.metronomeVolume;
         tapTempoLocked = false;
 
         EnableNormalisationProbe();
@@ -2253,11 +2281,12 @@ public:
 
         uint32_t baseDelay16 = (uint32_t)delayTimeSamples << 16;
 
-        // sine_lookup returns ±4096. We want ±128 samples in 16.16 format:
-        //   ±128 samples = ±8388608 in 16.16 (128 << 16 = 8388608)
-        //   Scale: ±4096 * 2048 = ±8388608. So multiply by 2048.
-        int32_t wowOffsetL = sine_lookup(wowPhaseL) * 2048;  // ±8388608 (±128 samples in 16.16)
-        int32_t wowOffsetR = sine_lookup(wowPhaseR) * 2048;
+        // sine_lookup returns ±4096. Multiply by wowDepthMul to get depth
+        // in 16.16 fixed-point samples. wowDepthMul is set from warbleLevel
+        // config (256-3072, see WARBLE_DEPTH_LUT). At default level 4:
+        //   ±4096 * 2048 = ±8388608 → ±128 samples = ±2.67ms ≈ ±29 cents
+        int32_t wowOffsetL = sine_lookup(wowPhaseL) * wowDepthMul;
+        int32_t wowOffsetR = sine_lookup(wowPhaseR) * wowDepthMul;
 
         // ---- Tape glitches: random transport irregularities ----
         // Models sticky capstans, worn rollers, momentary tape slips.
@@ -2896,7 +2925,12 @@ static void send_sysex(const uint8_t *data, uint32_t size)
 // Send current config state to web interface
 static void send_config_state(SharedUSBState *usb)
 {
-    uint8_t msg[] = { SYSEX_CONFIG_STATE, usb->configPtr->dryPassthrough };
+    uint8_t msg[] = {
+        SYSEX_CONFIG_STATE,
+        usb->configPtr->dryPassthrough,
+        usb->configPtr->metronomeVolume,
+        usb->configPtr->warbleLevel
+    };
     send_sysex(msg, sizeof(msg));
 }
 
@@ -2934,6 +2968,28 @@ static void process_incoming_sysex(const uint8_t *data, uint32_t size,
         config_save(usb->configPtr);
         // Confirm by echoing config state
         send_config_state(usb);
+        break;
+
+    case SYSEX_SET_METRONOME_VOLUME:
+        if (size == 2 && data[1] >= 1 && data[1] <= 10)
+        {
+            *usb->metronomeVolPtr = data[1];
+            usb->configPtr->metronomeVolume = data[1];
+            send_config_state(usb);
+        }
+        break;
+
+    case SYSEX_SET_WARBLE_LEVEL:
+        if (size == 2 && data[1] >= 1 && data[1] <= 5)
+        {
+            usb->configPtr->warbleLevel = data[1];
+            // Update the depth multiplier used by the ISR on core 0.
+            // WARBLE_DEPTH_LUT is a constexpr array in the Robodub class,
+            // but the values are known: {256, 768, 1280, 2048, 3072}.
+            static constexpr int32_t lut[5] = { 256, 768, 1280, 2048, 3072 };
+            *usb->wowDepthMulPtr = lut[data[1] - 1];
+            send_config_state(usb);
+        }
         break;
 
     case SYSEX_REQUEST_CONFIG:
