@@ -2604,10 +2604,9 @@ public:
                 // LED 0: clip warning
                 LedOn(0, clipHold > 0);
 
-                // LED 1: output level brightness
-                int32_t levelBright = peakLevel << 1;
-                if (levelBright > 4095) levelBright = 4095;
-                LedBrightness(1, levelBright);
+                // LED 1: stereo input detected (Audio In 2 connected)
+                // Solid when a cable is detected in Audio In 2.
+                LedOn(1, stereoInput);
 
                 // LED 2: Pulse In 2 activity
                 LedOn(2, currentPulse2);
@@ -2621,10 +2620,11 @@ public:
                 // clockCounter < 2400 gives a ~50ms flash per beat.
                 LedOn(4, clockCounter < 2400);
 
-                // LED 5: stereo input detected (Audio In 2 connected)
-                // Solid when a cable is detected in Audio In 2.
-                // Shows bar pulse flash when no stereo input.
-                LedOn(5, stereoInput ? true : (barPulseHold > 0));
+                // LED 5: output level brightness + bar pulse flash
+                int32_t levelBright = peakLevel << 1;
+                if (levelBright > 4095) levelBright = 4095;
+                if (barPulseHold > 0) levelBright = 4095;
+                LedBrightness(5, levelBright);
             }
         }
     }
