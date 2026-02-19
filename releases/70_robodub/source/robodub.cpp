@@ -405,18 +405,23 @@ static inline int32_t __not_in_flash_func(wobble_process)(TapeWobble *w)
 //
 // Output is 10-bit fixed-point: 1024 = 100% = unity gain.
 
+// Feedback curve values include +3% compensation for energy lost in the
+// feedback EQ dips (~1178Hz and ~2360Hz). This was previously a ×1055/1024
+// gain inside the feedback loop, but compounding per pass destabilised it.
+// Baking it into the curve applies it once at the multiplication stage.
+// 1024 = nominal unity; effective unity after dip losses ≈ 1055.
 static const int32_t feedback_curve_lut[11] = {
-    500,   // 0%   knob → 48.8% feedback  (repeats die fast)
-    750,   // 10%  knob → 73.2%           (steep ramp up)
-    900,   // 20%  knob → 87.9%           (short repeats)
-    950,   // 30%  knob → 92.8%           (getting warmer)
-    1024,  // 40%  knob → 100.0%          ← UNITY (plateau starts)
-    1024,  // 50%  knob → 100.0%          ← UNITY (plateau — solid sustain zone)
-    1036,  // 60%  knob → 101.2%          (gentle bloom)
-    1049,  // 70%  knob → 102.4%          (warming up)
-    1061,  // 80%  knob → 103.6%          (noticeable growth)
-    1073,  // 90%  knob → 104.8%          (thick and swelling)
-    1085   // 100% knob → 106.0%          (maximum bloom)
+    515,   // 0%   knob → 50.3% feedback  (repeats die fast)
+    773,   // 10%  knob → 75.5%           (steep ramp up)
+    927,   // 20%  knob → 90.5%           (short repeats)
+    979,   // 30%  knob → 95.6%           (getting warmer)
+    1055,  // 40%  knob → 103.0%          ← UNITY (plateau starts)
+    1055,  // 50%  knob → 103.0%          ← UNITY (solid sustain zone)
+    1067,  // 60%  knob → 104.2%          (gentle bloom)
+    1080,  // 70%  knob → 105.5%          (warming up)
+    1093,  // 80%  knob → 106.7%          (noticeable growth)
+    1105,  // 90%  knob → 107.9%          (thick and swelling)
+    1118   // 100% knob → 109.2%          (maximum bloom)
 };
 
 static inline int32_t __not_in_flash_func(get_feedback)(int32_t knob)
@@ -2156,12 +2161,11 @@ public:
         // buffer, and you hear it after the delay time has elapsed.
         // A web config option could enable dry passthrough for users
         // who want to use this as an end-of-chain effect.
-        // Compensation for energy lost in the feedback EQ dips (~3%).
-        // Applied at the output, NOT inside the feedback loop — putting
-        // makeup gain inside the loop compounds every round trip and
-        // destabilises the system. At the output it's a one-time boost.
-        int32_t outL = clamp((delOutL * 1055) >> 10, -2047, 2047);
-        int32_t outR = clamp((delOutR * 1055) >> 10, -2047, 2047);
+        // Dip energy compensation is now baked into the feedback curve LUT
+        // (each value ×1.030) so the loop gain is correct without any
+        // separate makeup gain here or in the feedback path.
+        int32_t outL = clamp(delOutL, -2047, 2047);
+        int32_t outR = clamp(delOutR, -2047, 2047);
 
         // ---- Ring modulator (Y knob / CV In 2) ----
         // Y knob controls both the carrier frequency AND the ring mod
