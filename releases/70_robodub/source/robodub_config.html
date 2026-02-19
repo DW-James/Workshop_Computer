@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="author" content="James Robinson / Claude">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Robodub Configuration</title>
+    <meta name="description" content="Web configuration interface for Robodub stereo dub delay — Music Thing Modular Workshop System Computer">
+
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+
+      body {
+        font-family: 'Courier New', monospace;
+        background: #1a1a2e;
+        color: #e0e0e0;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+
+      header {
+        text-align: center;
+        padding: 30px 20px 10px;
+      }
+
+      header h1 {
+        font-size: 28px;
+        font-weight: bold;
+        letter-spacing: 4px;
+        color: #ff6b35;
+      }
+
+      header p {
+        font-size: 12px;
+        color: #888;
+        margin-top: 4px;
+      }
+
+      #statusBar {
+        width: 100%;
+        max-width: 400px;
+        text-align: center;
+        padding: 8px;
+        font-size: 13px;
+        margin: 10px 0;
+      }
+
+      .status-connected { color: #4ecdc4; }
+      .status-disconnected { color: #ff6b6b; }
+      .status-loading { color: #feca57; }
+
+      #content {
+        width: 100%;
+        max-width: 400px;
+        padding: 0 20px 40px;
+        display: flex;
+        flex-direction: column;
+        gap: 24px;
+      }
+
+      .card {
+        background: #16213e;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 20px;
+      }
+
+      .card h2 {
+        font-size: 14px;
+        color: #ff6b35;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        margin-bottom: 12px;
+      }
+
+      .card p {
+        font-size: 12px;
+        color: #999;
+        line-height: 1.5;
+        margin-bottom: 12px;
+      }
+
+      /* Toggle switch */
+      .toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 0;
+      }
+
+      .toggle-label {
+        font-size: 14px;
+      }
+
+      .toggle-label.active { color: #4ecdc4; font-weight: bold; }
+      .toggle-label.inactive { color: #666; }
+
+      .toggle-switch {
+        position: relative;
+        width: 56px;
+        height: 28px;
+        margin: 0 12px;
+        flex-shrink: 0;
+      }
+
+      .toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .toggle-slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: #333;
+        border-radius: 28px;
+        transition: 0.3s;
+      }
+
+      .toggle-slider:before {
+        position: absolute;
+        content: "";
+        height: 22px;
+        width: 22px;
+        left: 3px;
+        bottom: 3px;
+        background: #e0e0e0;
+        border-radius: 50%;
+        transition: 0.3s;
+      }
+
+      input:checked + .toggle-slider {
+        background: #ff6b35;
+      }
+
+      input:checked + .toggle-slider:before {
+        transform: translateX(28px);
+      }
+
+      input:disabled + .toggle-slider {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      /* Buttons */
+      .btn {
+        display: block;
+        width: 100%;
+        padding: 12px;
+        font-family: 'Courier New', monospace;
+        font-size: 14px;
+        font-weight: bold;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        border: 2px solid;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+
+      .btn:disabled {
+        opacity: 0.3;
+        cursor: not-allowed;
+      }
+
+      .btn-save {
+        background: transparent;
+        color: #4ecdc4;
+        border-color: #4ecdc4;
+      }
+
+      .btn-save:hover:not(:disabled) {
+        background: #4ecdc4;
+        color: #1a1a2e;
+      }
+
+      .btn-save.saved {
+        background: #4ecdc4;
+        color: #1a1a2e;
+      }
+
+      #versionInfo {
+        text-align: center;
+        font-size: 11px;
+        color: #555;
+        padding: 10px;
+      }
+
+      .note {
+        font-size: 11px;
+        color: #666;
+        text-align: center;
+        padding: 0 20px;
+        line-height: 1.5;
+      }
+    </style>
+
+    <script>
+      ////////////////////////////////////////////////////////////
+      // WebMIDI boilerplate (from ComputerCard web_interface example)
+
+      var midiOutput = null, midiInput = null;
+      var midiActive = false;
+
+      async function MIDISetup(interfaceName, onConnect = () => {}, onDisconnect = () => {})
+      {
+        try
+        {
+          const midi = await navigator.requestMIDIAccess({ sysex: true });
+          BindDevices(midi, interfaceName, onConnect, onDisconnect);
+          midi.addEventListener('statechange', () => {
+            BindDevices(midi, interfaceName, onConnect, onDisconnect);
+          });
+        }
+        catch (error)
+        {
+          document.getElementById('statusBar').innerHTML =
+            '<span class="status-disconnected">WebMIDI error: ' + error + '</span>';
+        }
+      }
+
+      function BindDevices(midi, interfaceName, onConnect, onDisconnect)
+      {
+        if (midiActive)
+        {
+          const foundInput = [...midi.inputs.values()].some(input =>
+            input.name.includes(interfaceName) && input.state === "connected"
+          );
+          const foundOutput = [...midi.outputs.values()].some(output =>
+            output.name.includes(interfaceName) && output.state === "connected"
+          );
+          if (!foundInput || !foundOutput)
+          {
+            midiActive = false;
+            midiOutput = undefined;
+            midiInput = undefined;
+            onDisconnect();
+          }
+        }
+        else
+        {
+          midiInput = [...midi.inputs.values()].find(input =>
+            input.name.includes(interfaceName) && input.state === "connected");
+          midiOutput = [...midi.outputs.values()].find(output =>
+            output.name.includes(interfaceName) && output.state === "connected");
+
+          if (midiInput && midiOutput)
+          {
+            midiInput.onmidimessage = HandleMIDI;
+            midiActive = true;
+            onConnect();
+          }
+          else
+          {
+            midiOutput = undefined;
+            midiInput = undefined;
+          }
+        }
+      }
+
+      function HandleMIDI(event)
+      {
+        const data = Array.from(event.data);
+        if (data.length > 3
+            && data[0] === 0xF0
+            && data[1] === 0x7D
+            && data[data.length - 1] === 0xF7)
+        {
+          ProcessIncomingSysEx(data.slice(2, data.length - 1));
+        }
+      }
+
+      function Assert7BitArray(arr, name)
+      {
+        if (!Array.isArray(arr)) throw new Error(name + ' must be an array');
+        arr.forEach((v, i) => {
+          if (v < 0 || v > 0x7F)
+            throw new Error(name + '[' + i + '] invalid (' + v + '). Must be 0-127.');
+        });
+      }
+
+      function SendSysEx(dataBytes)
+      {
+        if (midiActive)
+        {
+          Assert7BitArray(dataBytes, 'dataBytes');
+          midiOutput.send([0xF0, 0x7D, ...dataBytes, 0xF7]);
+        }
+      }
+
+      ////////////////////////////////////////////////////////////
+      // Robodub-specific protocol
+
+      const SYSEX_SET_DRY_PASSTHROUGH = 0x01;
+      const SYSEX_SAVE_TO_FLASH       = 0x02;
+      const SYSEX_REQUEST_CONFIG       = 0x03;
+      const SYSEX_CONFIG_STATE         = 0x04;
+      const SYSEX_FIRMWARE_VERSION     = 0x10;
+
+      var firmwareMajor = 0, firmwareMinor = 0, firmwarePatch = 0;
+
+      window.onload = function()
+      {
+        MIDISetup("Robodub", ConnectToComputer, DisconnectFromComputer);
+      };
+
+      function ConnectToComputer()
+      {
+        document.getElementById('statusBar').innerHTML =
+          '<span class="status-connected">&#x25CF; Connected</span>';
+        enableControls(true);
+        // Request current config from firmware
+        SendSysEx([SYSEX_REQUEST_CONFIG]);
+      }
+
+      function DisconnectFromComputer()
+      {
+        document.getElementById('statusBar').innerHTML =
+          '<span class="status-disconnected">&#x25CF; Disconnected &mdash; plug in Robodub via USB</span>';
+        enableControls(false);
+        updateVersionDisplay();
+      }
+
+      function enableControls(enabled)
+      {
+        document.getElementById('dryPassthroughToggle').disabled = !enabled;
+        document.getElementById('saveBtn').disabled = !enabled;
+      }
+
+      function ProcessIncomingSysEx(dataBytes)
+      {
+        if (dataBytes[0] === SYSEX_CONFIG_STATE && dataBytes.length === 2)
+        {
+          // Update toggle to match firmware state
+          var dryPassthrough = dataBytes[1] !== 0;
+          document.getElementById('dryPassthroughToggle').checked = dryPassthrough;
+          updateModeLabels(dryPassthrough);
+        }
+
+        if (dataBytes[0] === SYSEX_FIRMWARE_VERSION && dataBytes.length === 4)
+        {
+          firmwareMajor = dataBytes[1];
+          firmwareMinor = dataBytes[2];
+          firmwarePatch = dataBytes[3];
+          updateVersionDisplay();
+        }
+      }
+
+      function onToggleDryPassthrough()
+      {
+        var checked = document.getElementById('dryPassthroughToggle').checked;
+        SendSysEx([SYSEX_SET_DRY_PASSTHROUGH, checked ? 1 : 0]);
+        updateModeLabels(checked);
+      }
+
+      function onSave()
+      {
+        SendSysEx([SYSEX_SAVE_TO_FLASH]);
+        // Visual feedback
+        var btn = document.getElementById('saveBtn');
+        btn.textContent = 'Saved!';
+        btn.classList.add('saved');
+        setTimeout(function() {
+          btn.textContent = 'Save to Flash';
+          btn.classList.remove('saved');
+        }, 1500);
+      }
+
+      function updateModeLabels(dryPassthrough)
+      {
+        var insertLabel = document.getElementById('insertLabel');
+        var endLabel = document.getElementById('endChainLabel');
+        if (dryPassthrough)
+        {
+          insertLabel.className = 'toggle-label inactive';
+          endLabel.className = 'toggle-label active';
+        }
+        else
+        {
+          insertLabel.className = 'toggle-label active';
+          endLabel.className = 'toggle-label inactive';
+        }
+      }
+
+      function updateVersionDisplay()
+      {
+        var el = document.getElementById('versionInfo');
+        var text = 'Interface: v1.0.0';
+        if (midiActive)
+          text += ' &nbsp;|&nbsp; Firmware: v' + firmwareMajor + '.' + firmwareMinor + '.' + firmwarePatch;
+        else
+          text += ' &nbsp;|&nbsp; Firmware: N/A';
+        el.innerHTML = text;
+      }
+    </script>
+  </head>
+
+  <body>
+    <header>
+      <h1>ROBODUB</h1>
+      <p>Stereo Dub Delay Configuration</p>
+    </header>
+
+    <div id="statusBar">
+      <span class="status-loading">Waiting for WebMIDI...</span>
+    </div>
+
+    <div id="content">
+
+      <div class="card">
+        <h2>Signal Routing</h2>
+        <p>
+          <strong>Insert mode:</strong> wet-only output for mixer send/return loops.
+          <br>
+          <strong>End-of-chain:</strong> dry + wet summed for standalone use
+          (no mixer needed).
+        </p>
+        <div class="toggle-row">
+          <span id="insertLabel" class="toggle-label active">Insert</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="dryPassthroughToggle" disabled
+                   onchange="onToggleDryPassthrough()">
+            <span class="toggle-slider"></span>
+          </label>
+          <span id="endChainLabel" class="toggle-label inactive">End-of-chain</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Save</h2>
+        <p>
+          Write current settings to flash memory. Settings persist across power cycles.
+        </p>
+        <button id="saveBtn" class="btn btn-save" disabled onclick="onSave()">
+          Save to Flash
+        </button>
+      </div>
+
+    </div>
+
+    <div id="versionInfo">Interface: v1.0.0 &nbsp;|&nbsp; Firmware: N/A</div>
+
+    <p class="note">
+      Open this page in Chrome (or Chromium-based browser) with the Workshop Computer connected via USB.
+      <br>
+      WebMIDI is required &mdash; not supported on iOS.
+    </p>
+
+  </body>
+</html>
