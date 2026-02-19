@@ -1865,7 +1865,7 @@ public:
         {
             config_defaults(&config);
         }
-        dryPassthrough = config.dryPassthrough != 0;
+        dryPassthrough = (config.dryPassthrough != 0);
         dryL = 0;
         dryR = 0;
         filter_init(&inputHPF);
@@ -2478,22 +2478,12 @@ public:
         delay_write(&delayR, (int16_t)writeR);
 
         // ---- Output mix ----
-        // Insert mode (default): delay-only output. Designed for mixer
-        //   send/return loops where dry is already in the mix.
-        // End-of-chain mode (web config): dry + wet summed. For use as
-        //   a standalone effect where the delay is the only signal path.
+        // Always wet-only here. The delay output feeds into ring mod and
+        // multiband compressor. If end-of-chain mode is active, the dry
+        // signal is summed in AFTER those effects (see below AudioOut).
         // Dip energy compensation baked into feedback curve LUT (×1.030).
-        int32_t outL, outR;
-        if (dryPassthrough)
-        {
-            outL = clamp(delOutL + dryL, -2047, 2047);
-            outR = clamp(delOutR + dryR, -2047, 2047);
-        }
-        else
-        {
-            outL = clamp(delOutL, -2047, 2047);
-            outR = clamp(delOutR, -2047, 2047);
-        }
+        int32_t outL = clamp(delOutL, -2047, 2047);
+        int32_t outR = clamp(delOutR, -2047, 2047);
 
         // ---- Ring modulator (Y knob / CV In 2) ----
         // Y knob controls both the carrier frequency AND the ring mod
@@ -2700,6 +2690,18 @@ public:
             int32_t tone = tt_generate_tone();
             outL += tone;
             outR += tone;
+        }
+
+        // ---- Dry passthrough (end-of-chain mode) ----
+        // In end-of-chain mode, sum the original dry input AFTER ring mod
+        // and multiband compressor. This way the dry signal is uncoloured
+        // by effects processing, and the sidechain compressor (which ducks
+        // the wet signal against the dry) works correctly — it would be
+        // self-defeating to compress the dry signal it's ducking against.
+        if (dryPassthrough)
+        {
+            outL += dryL;
+            outR += dryR;
         }
 
         AudioOut1((int16_t)clamp(outL, -2047, 2047));
