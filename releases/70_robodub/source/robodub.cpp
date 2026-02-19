@@ -12,8 +12,9 @@
     controllable feedback bloom. The ring modulator adds tremolo, warble,
     or metallic overtones on top. Everything stays immediate and playable.
 
-    No dry signal passthrough — designed as a send effect, safe with gear
-    that lacks mixer sends (Deluge, Reface, grooveboxes, etc).
+    Two routing modes (configurable via web interface, saved to flash):
+      Insert mode (default): wet-only output for mixer send/return.
+      End-of-chain mode: dry+wet summed for standalone use.
 
     Controls:
         Main knob:  Feedback amount. Below halfway: repeats fade.
@@ -56,8 +57,12 @@
 #include "ComputerCard.h"
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "pico/flash.h"
 #include "hardware/clocks.h"
+#include "hardware/flash.h"
+#include "hardware/sync.h"
 #include <cmath>    // for sinf() — used at startup only, never in ISR
+#include <cstring>  // for memcpy
 
 
 // ============================================================================
@@ -84,6 +89,98 @@ static inline uint32_t __not_in_flash_func(fast_rand)()
 {
     rng_state = 1664525u * rng_state + 1013904223u;
     return rng_state;
+}
+
+
+// ============================================================================
+// Flash-persistent configuration
+// ============================================================================
+// Stores user preferences (dry passthrough, etc.) in the last 4KB sector
+// of flash. Read on boot, written on web config "Save" command.
+//
+// Layout: 256-byte page-aligned struct with magic number for validation.
+// If magic doesn't match (first boot or corrupted), defaults are used.
+//
+// Flash write safety (following reverb card pattern):
+//   1. Stop ADC DMA via ComputerCard's runADCMode mechanism
+//   2. Disable all interrupts on the calling core
+//   3. Erase sector, then program page
+//   4. Restore interrupts and restart ADC
+// This ensures no code tries to execute from flash during the write.
+
+// Magic number: "RDB0" in little-endian = 0x30424452
+static constexpr uint32_t ROBODUB_CONFIG_MAGIC = 0x30424452;
+
+// Flash address: last 4KB sector of flash (works on 2MB and 16MB chips)
+static constexpr uint32_t CONFIG_FLASH_OFFSET =
+    (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE);
+
+// Config struct — must fit in one 256-byte flash page.
+// All fields are plain data types (no pointers).
+struct __attribute__((packed)) RobodubConfig
+{
+    uint32_t magic;             // Must be ROBODUB_CONFIG_MAGIC
+    uint8_t  version;           // Struct version (for future migration)
+    uint8_t  dryPassthrough;    // 0=insert (wet only), 1=end-of-chain (wet+dry)
+    uint8_t  reserved[250];     // Padding to 256 bytes (future settings)
+};
+
+static_assert(sizeof(RobodubConfig) == 256, "Config must be exactly one flash page");
+
+// Read config from flash. Returns true if valid config was found.
+static bool config_load(RobodubConfig *cfg)
+{
+    // Flash is memory-mapped at XIP_BASE + offset
+    const RobodubConfig *stored =
+        (const RobodubConfig *)(XIP_BASE + CONFIG_FLASH_OFFSET);
+
+    if (stored->magic == ROBODUB_CONFIG_MAGIC && stored->version == 1)
+    {
+        memcpy(cfg, stored, sizeof(RobodubConfig));
+        return true;
+    }
+    return false;
+}
+
+// Context struct passed to the flash_safe_execute callback.
+struct FlashWriteContext {
+    const RobodubConfig *cfg;
+};
+
+// Callback for flash_safe_execute — runs with interrupts disabled on both
+// cores, so no code is fetching from flash. MUST be in RAM.
+static void __not_in_flash_func(config_save_callback)(void *param)
+{
+    FlashWriteContext *ctx = (FlashWriteContext *)param;
+
+    // Prepare a page-aligned buffer (flash_range_program requires 256-byte alignment)
+    uint8_t page_buf[FLASH_PAGE_SIZE] __attribute__((aligned(4)));
+    memcpy(page_buf, ctx->cfg, sizeof(RobodubConfig));
+
+    flash_range_erase(CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
+    flash_range_program(CONFIG_FLASH_OFFSET, page_buf, FLASH_PAGE_SIZE);
+}
+
+// Write config to flash using the Pico SDK's flash_safe_execute.
+// This handles multicore safety automatically:
+//   - Locks out core 0 (which must have called flash_safe_execute_core_init())
+//   - Disables interrupts on the calling core
+//   - Erases and programs flash
+//   - Restores everything
+// Audio will glitch briefly (~5ms) but resumes automatically.
+static int config_save(const RobodubConfig *cfg)
+{
+    FlashWriteContext ctx = { cfg };
+    return flash_safe_execute(config_save_callback, &ctx, 500);  // 500ms timeout
+}
+
+// Prepare a default config struct
+static void config_defaults(RobodubConfig *cfg)
+{
+    memset(cfg, 0, sizeof(RobodubConfig));
+    cfg->magic = ROBODUB_CONFIG_MAGIC;
+    cfg->version = 1;
+    cfg->dryPassthrough = 0;  // Insert mode (wet only) by default
 }
 
 
@@ -1356,6 +1453,9 @@ class Robodub : public ComputerCard
     // --- Sidechain ducking (core 1) ---
     SharedSidechain sidechain;
 
+    // --- Flash-persistent configuration ---
+    RobodubConfig config;          // Current config (loaded from flash on boot)
+
     // --- Tap tempo ---
     TapTempoState ttState;
 
@@ -1695,6 +1795,19 @@ class Robodub : public ComputerCard
         }
     }
 
+    // Save current config to flash.
+    // Uses Pico SDK's flash_safe_execute which handles multicore safety:
+    //   - Locks out core 0 via multicore_lockout (core 0 must have called
+    //     flash_safe_execute_core_init() at startup)
+    //   - Disables interrupts on core 1 (the calling core)
+    //   - Erases + programs the last flash sector
+    //   - Restores everything automatically
+    // Audio glitches briefly (~5ms) but resumes automatically.
+    void SaveConfigToFlash()
+    {
+        config_save(&config);
+    }
+
 public:
     Robodub()
     {
@@ -1703,7 +1816,12 @@ public:
         delay_init(&delayL, DELAY_BUFFER_MAX);
         delay_init(&delayR, DELAY_BUFFER_MAX);
 
-        dryPassthrough = false;
+        // Load config from flash (or use defaults on first boot)
+        if (!config_load(&config))
+        {
+            config_defaults(&config);
+        }
+        dryPassthrough = config.dryPassthrough != 0;
         dryL = 0;
         dryR = 0;
         filter_init(&inputHPF);
@@ -2790,6 +2908,12 @@ int main()
     // 144MHz (3000 cycles). Clean PLL multiple (12MHz × 16) avoids ADC
     // tonal artefacts from fractional PLL division.
     set_sys_clock_khz(192000, true);
+
+    // Allow core 1 to safely write to flash by registering core 0 as a
+    // lockout victim. This sets up a SIO FIFO IRQ handler that core 1
+    // can trigger to temporarily pause core 0 during flash operations.
+    // Must be called before Run() so it's ready when core 1 needs it.
+    flash_safe_execute_core_init();
 
     // Static allocation — keeps large object off the small RP2040 stack.
     static Robodub robodub;

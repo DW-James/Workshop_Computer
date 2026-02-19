@@ -24,16 +24,19 @@ target_include_directories(robodub PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}/../../../Demonstrations+HelloWorlds/PicoSDK/ComputerCard/
 )
 
-# Required hardware libraries for ComputerCard
+# Required hardware libraries for ComputerCard + flash config
 target_link_libraries(robodub
     pico_unique_id
     pico_stdlib
     pico_multicore
+    pico_flash
     hardware_dma
     hardware_i2c
     hardware_pwm
     hardware_adc
     hardware_spi
+    hardware_flash
+    hardware_sync
 )
 
 # Disable USB stdio — interferes with GPIO4 normalisation probe
