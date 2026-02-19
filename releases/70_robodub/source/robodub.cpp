@@ -2146,13 +2146,8 @@ public:
         // so we only need a hint of cross-feed on top of that.
         // Total loop gain contribution: ~103% — close enough to unity
         // that the feedback LUT doesn't need to compensate.
-        //
-        // Soft saturation at the write point: catches the sum of input +
-        // feedback + crossfeed. Knee at ±1800, 2:1 above, hard limit at
-        // ±2047. Tames peaks that would hard-clip on the DAC, and naturally
-        // limits whichever frequency is "winning" in the feedback loop.
-        int32_t writeL = delay_soft_clip(delayInput + feedbackL + (feedbackR >> 5));
-        int32_t writeR = delay_soft_clip(delayInput + feedbackR + (feedbackL >> 5));
+        int32_t writeL = clamp(delayInput + feedbackL + (feedbackR >> 5), -2047, 2047);
+        int32_t writeR = clamp(delayInput + feedbackR + (feedbackL >> 5), -2047, 2047);
         delay_write(&delayL, (int16_t)writeL);
         delay_write(&delayR, (int16_t)writeR);
 
