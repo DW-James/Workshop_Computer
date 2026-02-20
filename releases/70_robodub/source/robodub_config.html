@@ -362,6 +362,7 @@
       const SYSEX_SET_WARBLE_LEVEL      = 0x06;
       const SYSEX_SET_DEBUG_FLAGS       = 0x07;
       const SYSEX_SET_TT_FLICKS        = 0x08;
+      const SYSEX_SET_DUCKING_LEVEL    = 0x09;
       const SYSEX_FIRMWARE_VERSION      = 0x10;
 
       // Debug flags bitfield (matches firmware DBG_BYPASS_* constants)
@@ -400,6 +401,7 @@
         document.getElementById('metronomeSlider').disabled = !enabled;
         document.getElementById('warbleSlider').disabled = !enabled;
         document.getElementById('flicksSlider').disabled = !enabled;
+        document.getElementById('duckingSlider').disabled = !enabled;
         document.getElementById('saveBtn').disabled = !enabled;
         document.getElementById('dbgSidechain').disabled = !enabled;
         document.getElementById('dbgCompressor').disabled = !enabled;
@@ -444,6 +446,14 @@
             var flicks = dataBytes[5];
             document.getElementById('flicksSlider').value = flicks;
             document.getElementById('flicksValue').textContent = flicks;
+          }
+
+          // Ducking level (0-2)
+          if (dataBytes.length >= 7)
+          {
+            var ducking = dataBytes[6];
+            document.getElementById('duckingSlider').value = ducking;
+            updateDuckingLabel(ducking);
           }
         }
 
@@ -520,6 +530,20 @@
         var val = parseInt(document.getElementById('flicksSlider').value);
         document.getElementById('flicksValue').textContent = val;
         SendSysEx([SYSEX_SET_TT_FLICKS, val]);
+      }
+
+      var duckingLabels = ['Low', 'Medium', 'High'];
+
+      function onDuckingChange()
+      {
+        var val = parseInt(document.getElementById('duckingSlider').value);
+        updateDuckingLabel(val);
+        SendSysEx([SYSEX_SET_DUCKING_LEVEL, val]);
+      }
+
+      function updateDuckingLabel(val)
+      {
+        document.getElementById('duckingValue').textContent = duckingLabels[val];
       }
 
       function onDebugToggle()
@@ -629,6 +653,24 @@
           <div class="slider-labels">
             <span>None</span>
             <span>Seasick</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Sidechain Ducking</h2>
+        <p>How aggressively the delay output ducks when dry signal is present.
+           Low is subtle, high pumps hard.</p>
+        <div class="slider-row">
+          <div class="slider-header">
+            <span class="slider-label">Intensity</span>
+            <span id="duckingValue" class="slider-value">Medium</span>
+          </div>
+          <input type="range" id="duckingSlider" min="0" max="2" value="1"
+                 disabled oninput="onDuckingChange()">
+          <div class="slider-labels">
+            <span>Low</span>
+            <span>High</span>
           </div>
         </div>
       </div>

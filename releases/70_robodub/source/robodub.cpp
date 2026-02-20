@@ -126,7 +126,8 @@ struct __attribute__((packed)) RobodubConfig
     uint8_t  metronomeVolume;   // 1-10 (default 7)
     uint8_t  warbleLevel;       // 1-5 (default 4)
     uint8_t  ttFlicksRequired;  // 2-6 (default 3) — flicks to enter tap tempo
-    uint8_t  reserved[247];     // Padding to 256 bytes (future settings)
+    uint8_t  duckingLevel;      // 0=low, 1=medium (default), 2=high
+    uint8_t  reserved[246];     // Padding to 256 bytes (future settings)
 };
 
 static_assert(sizeof(RobodubConfig) == 256, "Config must be exactly one flash page");
@@ -217,6 +218,7 @@ static constexpr uint8_t SYSEX_SET_METRONOME_VOLUME  = 0x05; // web → firmware
 static constexpr uint8_t SYSEX_SET_WARBLE_LEVEL      = 0x06; // web → firmware: [0x06, 1-5]
 static constexpr uint8_t SYSEX_SET_DEBUG_FLAGS        = 0x07; // web → firmware: [0x07, flags_byte]
 static constexpr uint8_t SYSEX_SET_TT_FLICKS         = 0x08; // web → firmware: [0x08, 2-6]
+static constexpr uint8_t SYSEX_SET_DUCKING_LEVEL     = 0x09; // web → firmware: [0x09, 0-2]
 static constexpr uint8_t SYSEX_FIRMWARE_VERSION      = 0x10; // firmware → web: [0x10, maj, min, patch]
 
 // Debug flags bitfield (SYSEX_SET_DEBUG_FLAGS payload byte):
@@ -788,10 +790,26 @@ struct BandDuckParams {
     int32_t release_coeff;  // Envelope release (higher = faster)
 };
 
-static const BandDuckParams duck_params[NUM_BANDS] = {
+// Three ducking intensity levels: Low (gentle), Medium (default), High (extreme).
+// Low:    higher thresholds, shallower depth — subtle separation.
+// Medium: the original tuning — balanced sidechain ducking.
+// High:   lower thresholds, much deeper cuts, faster attack — dramatic pumping.
+
+static const BandDuckParams duck_params_low[NUM_BANDS] = {
     //  thresh  depth   inv_range   attack      release
-    //                  (range)     (time)      (time)
-    { 200,      820,    109,        910,        66  },  // <100Hz:     high thresh, -8dB deep, 75ms attack, 200ms release
+    { 300,      410,    73,         910,        44  },  // <100Hz:     -3dB, 75ms attack, 300ms release
+    { 270,      384,    87,         1820,       55  },  // 100-250Hz:  -2.8dB, 40ms attack, 240ms release
+    { 240,      358,    97,         3547,       66  },  // 250-600Hz:  -2.5dB, 20ms attack, 200ms release
+    { 220,      332,    109,        6400,       87  },  // 600-1.5kHz: -2.3dB, 10ms attack, 150ms release
+    { 160,      358,    131,        9600,       66  },  // 1.5-3.5kHz: -2.5dB, 7ms attack, 200ms release
+    { 130,      358,    146,        13107,      66  },  // 3.5-7kHz:   -2.5dB, 5ms attack, 200ms release
+    { 110,      332,    164,        19200,      66  },  // 7-12kHz:    -2.3dB, 3.5ms attack, 200ms release
+    { 100,      307,    218,        26214,      66  },  // 12kHz+:     -2dB, 2.5ms attack, 200ms release
+};
+
+static const BandDuckParams duck_params_medium[NUM_BANDS] = {
+    //  thresh  depth   inv_range   attack      release
+    { 200,      820,    109,        910,        66  },  // <100Hz:     -8dB, 75ms attack, 200ms release
     { 180,      768,    131,        1820,       87  },  // 100-250Hz:  -6.5dB, 40ms attack, 150ms release
     { 160,      716,    146,        3547,       109 },  // 250-600Hz:  -5.5dB, 20ms attack, 120ms release
     { 150,      665,    164,        6400,       131 },  // 600-1.5kHz: -5dB, 10ms attack, 100ms release
@@ -799,6 +817,25 @@ static const BandDuckParams duck_params[NUM_BANDS] = {
     { 80,       716,    218,        13107,      87  },  // 3.5-7kHz:   -5.5dB, 5ms attack, 150ms release
     { 70,       665,    256,        19200,      87  },  // 7-12kHz:    -5dB, 3.5ms attack, 150ms release
     { 60,       614,    327,        26214,      87  },  // 12kHz+:     -4dB, 2.5ms attack, 150ms release
+};
+
+static const BandDuckParams duck_params_high[NUM_BANDS] = {
+    //  thresh  depth   inv_range   attack      release
+    { 100,      972,    164,        1820,       44  },  // <100Hz:     -14dB, 40ms attack, 300ms release
+    { 90,       950,    197,        3547,       55  },  // 100-250Hz:  -13dB, 20ms attack, 240ms release
+    { 80,       922,    218,        6400,       66  },  // 250-600Hz:  -12dB, 10ms attack, 200ms release
+    { 70,       900,    256,        9600,       87  },  // 600-1.5kHz: -11dB, 7ms attack, 150ms release
+    { 50,       922,    327,        13107,      55  },  // 1.5-3.5kHz: -12dB, 5ms attack, 240ms release
+    { 40,       922,    410,        19200,      55  },  // 3.5-7kHz:   -12dB, 3.5ms attack, 240ms release
+    { 35,       900,    468,        26214,      55  },  // 7-12kHz:    -11dB, 2.5ms attack, 240ms release
+    { 30,       870,    546,        32768,      55  },  // 12kHz+:     -10dB, 2ms attack, 240ms release
+};
+
+// Index by ducking level: 0=low, 1=medium, 2=high
+static const BandDuckParams *duck_params_table[3] = {
+    duck_params_low,
+    duck_params_medium,
+    duck_params_high
 };
 
 // Shared state between core 0 (ISR) and core 1 (sidechain loop).
@@ -828,6 +865,7 @@ struct SharedUSBState {
     volatile int32_t *wowDepthMulPtr;   // Points to Robodub::wowDepthMul
     volatile uint8_t *debugFlagsPtr;    // Points to Robodub::debugFlags
     volatile uint8_t *ttFlicksPtr;      // Points to Robodub::ttFlicksRequired
+    volatile uint8_t *duckingLevelPtr;  // Points to Robodub::duckingLevel
     RobodubConfig *configPtr;           // Points to Robodub::config (for save)
 };
 
@@ -1575,6 +1613,7 @@ class Robodub : public ComputerCard
 
     // --- Sidechain ducking (core 1) ---
     SharedSidechain sidechain;
+    volatile uint8_t duckingLevel;  // 0=low, 1=medium, 2=high (read by core 1)
 
     // --- Debug / diagnostics flags (runtime-only, not saved to flash) ---
     volatile uint8_t debugFlags;   // Bitfield: see DBG_BYPASS_* constants
@@ -1974,10 +2013,13 @@ public:
             config.warbleLevel = 4;
         if (config.ttFlicksRequired < 2 || config.ttFlicksRequired > 6)
             config.ttFlicksRequired = 3;
+        if (config.duckingLevel > 2)
+            config.duckingLevel = 1;  // Default: medium
 
         dryPassthrough = (config.dryPassthrough != 0);
         ttMetronomeVolume = config.metronomeVolume;
         wowDepthMul = WARBLE_DEPTH_LUT[config.warbleLevel];
+        duckingLevel = config.duckingLevel;
         dryL = 0;
         dryR = 0;
         filter_init(&inputHPF);
@@ -2063,6 +2105,7 @@ public:
         usbState.wowDepthMulPtr = &wowDepthMul;
         usbState.debugFlagsPtr = &debugFlags;
         usbState.ttFlicksPtr = &ttFlicksRequired;
+        usbState.duckingLevelPtr = &duckingLevel;
         usbState.configPtr = &config;
         g_usb_state = &usbState;
 
@@ -3092,7 +3135,8 @@ static void send_config_state(SharedUSBState *usb)
         usb->configPtr->metronomeVolume,
         usb->configPtr->warbleLevel,
         *usb->debugFlagsPtr,
-        usb->configPtr->ttFlicksRequired
+        usb->configPtr->ttFlicksRequired,
+        usb->configPtr->duckingLevel
     };
     send_sysex(msg, sizeof(msg));
 }
@@ -3168,6 +3212,15 @@ static void process_incoming_sysex(const uint8_t *data, uint32_t size,
         {
             usb->configPtr->ttFlicksRequired = data[1];
             *usb->ttFlicksPtr = data[1];
+            send_config_state(usb);
+        }
+        break;
+
+    case SYSEX_SET_DUCKING_LEVEL:
+        if (size == 2 && data[1] <= 2)
+        {
+            usb->configPtr->duckingLevel = data[1];
+            *usb->duckingLevelPtr = data[1];
             send_config_state(usb);
         }
         break;
@@ -3308,6 +3361,10 @@ static void core1_sidechain_entry()
         // Per-band envelope follower + ducking gain computation.
         // Each band has its own threshold, depth, and attack/release —
         // bass ducks deep and slow, highs duck light and fast.
+        // Ducking level (low/medium/high) selects which parameter table to use.
+        uint8_t dl = *usb->duckingLevelPtr;
+        if (dl > 2) dl = 1;  // Safety clamp
+        const BandDuckParams *duck_params = duck_params_table[dl];
         for (int i = 0; i < NUM_BANDS; i++)
         {
             const BandDuckParams *p = &duck_params[i];
