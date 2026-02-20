@@ -2368,10 +2368,13 @@ public:
                 int32_t lpgCoeff = (gateEnvelope * 15);
                 int32_t vcaL = (filteredL * gateEnvelope) >> 12;
                 int32_t vcaR = (filteredR * gateEnvelope) >> 12;
-                delayInputL += filter_lp(&lpgFilterL, lpgCoeff, vcaL);
-                delayInputR += filter_lp(&lpgFilterR, lpgCoeff, vcaR);
-                // Continue capturing the LPG release tail into sample buffer
-                if (sampleBuf.capturing) samplebuf_write(&sampleBuf, (int16_t)delayInputL, (int16_t)delayInputR);
+                int32_t tailL = filter_lp(&lpgFilterL, lpgCoeff, vcaL);
+                int32_t tailR = filter_lp(&lpgFilterR, lpgCoeff, vcaR);
+                // Capture only the pure LPG tail (not any concurrent
+                // sample playback that may be in delayInput)
+                if (sampleBuf.capturing) samplebuf_write(&sampleBuf, (int16_t)tailL, (int16_t)tailR);
+                delayInputL += tailL;
+                delayInputR += tailR;
             }
             else
             {
