@@ -1537,8 +1537,6 @@ class Robodub : public ComputerCard
     // --- Sample buffer ---
     SampleBuffer sampleBuf;
     bool lastSwitchDown;       // Track switch transitions
-    int32_t lastSwitchPos;     // Previous switch position (for blank detection)
-    int32_t switchBlankCount;  // Countdown: zero delay input to mask ADC crosstalk
 
     // --- LPG-style gate envelope ---
     // Approximates a vactrol low-pass gate: envelope controls both
@@ -2022,8 +2020,6 @@ public:
 
         samplebuf_init(&sampleBuf);
         lastSwitchDown = false;
-        lastSwitchPos = Switch::Middle;
-        switchBlankCount = 0;
         gateEnvelope = 0;
         filter_init(&lpgFilterL);
         filter_init(&lpgFilterR);
@@ -2121,16 +2117,6 @@ public:
         // X knob controls chaos directly.
         int32_t chaosKnob = chaosKnobRaw;
         int32_t switchPos  = SwitchVal();
-
-        // ADC crosstalk blank: the RP2040's shared SAR ADC injects a small
-        // voltage spike into adjacent channels when the toggle switch makes
-        // a large transition. That spike gets captured into the delay buffer
-        // and repeated by feedback, turning a single pop into a crackle.
-        // Blanking delay input for 8 samples (~0.17ms) after any switch
-        // change eats the spike. Well within the LPG's ~1ms attack, so
-        // it's completely inaudible as lost audio.
-        if (switchPos != lastSwitchPos) switchBlankCount = 8;
-        lastSwitchPos = switchPos;
 
         // Flick detection runs in all modes (lightweight, ~10 cycles)
         if (ttState == TT_OFF) tt_detect_flick(switchPos);
@@ -2401,21 +2387,6 @@ public:
                 filter_init(&lpgFilterL);
                 filter_init(&lpgFilterR);
             }
-        }
-
-        // ADC crosstalk blank: zero delay input while countdown is active.
-        // Skip if the LPG gate is still releasing — the release tail is
-        // a smooth fade that shouldn't be interrupted (that causes static).
-        if (switchBlankCount > 0 && gateEnvelope == 0)
-        {
-            delayInputL = 0;
-            delayInputR = 0;
-            switchBlankCount--;
-        }
-        else if (switchBlankCount > 0 && gateEnvelope > 0)
-        {
-            // LPG is handling the transition smoothly — cancel the blank.
-            switchBlankCount = 0;
         }
 
         // ---- Feedback amount (Main knob, custom curve) ----
