@@ -101,6 +101,8 @@ Output is **wet-only** (delay + effects). Designed for mixer send/return loops w
 
 Output is **dry + wet summed**. The dry signal bypasses the ring modulator and multiband compressor entirely, keeping it clean and uncoloured. For use as a standalone effect where Robodub is the only signal path and you want a full mix output. Configure this via the web interface.
 
+> **Note:** In end-of-chain mode, the dry signal passes through the RP2040's 12-bit ADC and back out through the DAC. This adds some digital character to the dry path. For the highest fidelity, use insert mode with an external mixer handling the dry signal in the analogue domain.
+
 ---
 
 ## Tap Tempo
