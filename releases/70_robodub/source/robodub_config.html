@@ -265,8 +265,14 @@
         {
           const midi = await navigator.requestMIDIAccess({ sysex: true });
           BindDevices(midi, interfaceName, onConnect, onDisconnect);
+          var stateChangeTimer = null;
           midi.addEventListener('statechange', () => {
-            BindDevices(midi, interfaceName, onConnect, onDisconnect);
+            // Debounce: USB devices can flap connect/disconnect rapidly,
+            // flooding statechange events and freezing Chrome.
+            if (stateChangeTimer) clearTimeout(stateChangeTimer);
+            stateChangeTimer = setTimeout(() => {
+              BindDevices(midi, interfaceName, onConnect, onDisconnect);
+            }, 300);
           });
         }
         catch (error)

@@ -3017,11 +3017,20 @@ public:
 static void midi_stream_write_blocking(uint8_t cable, const uint8_t *data, uint32_t size)
 {
     uint32_t sent = 0;
+    uint32_t retries = 0;
     while (sent < size)
     {
         uint32_t n = tud_midi_stream_write(cable, data + sent, size - sent);
         sent += n;
-        if (!n) tud_task();  // Pump USB if buffer was full
+        if (!n)
+        {
+            tud_task();  // Pump USB if buffer was full
+            if (++retries > 2000) return;  // Bail out — host not draining (~2ms)
+        }
+        else
+        {
+            retries = 0;
+        }
     }
 }
 
@@ -3122,8 +3131,7 @@ static void process_incoming_sysex(const uint8_t *data, uint32_t size,
         break;
 
     default:
-        // Unknown message — echo it back for debugging (same as web_interface example)
-        send_sysex(data, size);
+        // Unknown message — silently ignore.
         break;
     }
 }
