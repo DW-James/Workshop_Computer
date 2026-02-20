@@ -2370,11 +2370,14 @@ public:
                 int32_t vcaR = (filteredR * gateEnvelope) >> 12;
                 int32_t tailL = filter_lp(&lpgFilterL, lpgCoeff, vcaL);
                 int32_t tailR = filter_lp(&lpgFilterR, lpgCoeff, vcaR);
-                // Capture only the pure LPG tail (not any concurrent
-                // sample playback that may be in delayInput)
+                // Capture only the pure LPG tail into the sample buffer
                 if (sampleBuf.capturing) samplebuf_write(&sampleBuf, (int16_t)tailL, (int16_t)tailR);
-                delayInputL += tailL;
-                delayInputR += tailR;
+                // Feed the tail to the delay so the gate release is
+                // smooth (no hard cut from full signal to silence).
+                // Use assignment, not +=, to avoid summing with sample
+                // playback that the Middle branch may have set.
+                delayInputL = tailL;
+                delayInputR = tailR;
             }
             else
             {
