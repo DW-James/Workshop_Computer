@@ -125,7 +125,8 @@ struct __attribute__((packed)) RobodubConfig
     uint8_t  dryPassthrough;    // 0=insert (wet only), 1=end-of-chain (wet+dry)
     uint8_t  metronomeVolume;   // 1-10 (default 7)
     uint8_t  warbleLevel;       // 1-5 (default 4)
-    uint8_t  reserved[248];     // Padding to 256 bytes (future settings)
+    uint8_t  ttFlicksRequired;  // 2-6 (default 3) — flicks to enter tap tempo
+    uint8_t  reserved[247];     // Padding to 256 bytes (future settings)
 };
 
 static_assert(sizeof(RobodubConfig) == 256, "Config must be exactly one flash page");
@@ -186,6 +187,7 @@ static void config_defaults(RobodubConfig *cfg)
     cfg->dryPassthrough = 0;  // Insert mode (wet only) by default
     cfg->metronomeVolume = 7; // 1-10, default 7
     cfg->warbleLevel = 4;     // 1-5, default 4
+    cfg->ttFlicksRequired = 3; // 2-6, default 3
 }
 
 
@@ -214,6 +216,7 @@ static constexpr uint8_t SYSEX_CONFIG_STATE          = 0x04; // firmware → web
 static constexpr uint8_t SYSEX_SET_METRONOME_VOLUME  = 0x05; // web → firmware: [0x05, 1-10]
 static constexpr uint8_t SYSEX_SET_WARBLE_LEVEL      = 0x06; // web → firmware: [0x06, 1-5]
 static constexpr uint8_t SYSEX_SET_DEBUG_FLAGS        = 0x07; // web → firmware: [0x07, flags_byte]
+static constexpr uint8_t SYSEX_SET_TT_FLICKS         = 0x08; // web → firmware: [0x08, 2-6]
 static constexpr uint8_t SYSEX_FIRMWARE_VERSION      = 0x10; // firmware → web: [0x10, maj, min, patch]
 
 // Debug flags bitfield (SYSEX_SET_DEBUG_FLAGS payload byte):
@@ -824,6 +827,7 @@ struct SharedUSBState {
     volatile uint8_t *metronomeVolPtr;  // Points to Robodub::ttMetronomeVolume
     volatile int32_t *wowDepthMulPtr;   // Points to Robodub::wowDepthMul
     volatile uint8_t *debugFlagsPtr;    // Points to Robodub::debugFlags
+    volatile uint8_t *ttFlicksPtr;      // Points to Robodub::ttFlicksRequired
     RobodubConfig *configPtr;           // Points to Robodub::config (for save)
 };
 
@@ -898,8 +902,8 @@ static constexpr uint8_t TT_SEQ_CONFIRM_LEN = 3;
 
 // Flick detection constants
 static constexpr uint32_t TT_FLICK_DEBOUNCE  = 240;     // 5ms debounce lockout
-static constexpr uint32_t TT_FLICK_WINDOW    = 96000;   // 2-second window
-static constexpr uint8_t  TT_FLICKS_REQUIRED = 3;       // Up<->Middle flicks to enter
+static constexpr uint32_t TT_FLICK_PER_FLICK = 38400;   // ~0.8s per flick (window = flicks * this)
+static constexpr uint8_t  TT_FLICKS_MAX      = 6;       // Maximum configurable flick count
 
 // Tap collection
 static constexpr uint8_t  TT_TAPS_REQUIRED   = 6;
@@ -1586,8 +1590,9 @@ class Robodub : public ComputerCard
 
     // Gesture detection
     int32_t  ttLastSwitchForFlick;   // Previous switch position for edge detection
-    uint32_t ttFlickTimestamps[3];   // Ring buffer of last 3 flick timestamps
+    uint32_t ttFlickTimestamps[TT_FLICKS_MAX]; // Ring buffer of flick timestamps
     uint8_t  ttFlickCount;           // Number of valid flicks in window
+    uint8_t  ttFlicksRequired;       // Configurable flick count (2-6, from config)
     uint32_t ttFlickDebounce;        // Debounce countdown (samples)
     uint32_t ttSampleCounter;        // Global sample counter for timestamps
 
@@ -1656,9 +1661,10 @@ class Robodub : public ComputerCard
         return (raw * (ttMetronomeVolume * 205)) >> 12;
     }
 
-    // Detect 4 rapid Up<->Middle switch flicks to enter tap tempo mode.
+    // Detect rapid Up<->Middle switch flicks to enter tap tempo mode.
     // Called every sample. Only transitions between Up and Middle count;
     // any involvement of Down resets the counter (isolates from normal play).
+    // ttFlicksRequired (2-6) and window (~0.8s per flick) are configurable.
     inline void __not_in_flash_func(tt_detect_flick)(int32_t sw)
     {
         // Debounce: wait after last valid transition
@@ -1678,30 +1684,30 @@ class Robodub : public ComputerCard
 
         // Valid flick: only count Up->Middle (one direction only).
         // A physical flick is Up->Middle->Up, but we only count the
-        // Up->Middle half. This means 4 physical round-trip flicks = 4 counts,
-        // not 8. Middle->Up is the return stroke and is ignored.
+        // Up->Middle half. This means N physical round-trip flicks = N counts,
+        // not 2N. Middle->Up is the return stroke and is ignored.
         if (prev == Switch::Up && sw == Switch::Middle)
         {
+            uint8_t req = ttFlicksRequired;
             ttFlickDebounce = TT_FLICK_DEBOUNCE;
 
             // Store timestamp in ring buffer
-            uint8_t idx = ttFlickCount < TT_FLICKS_REQUIRED
-                        ? ttFlickCount
-                        : (TT_FLICKS_REQUIRED - 1);
+            uint8_t idx = ttFlickCount < req ? ttFlickCount : (req - 1);
             // Shift buffer if full
-            if (ttFlickCount >= TT_FLICKS_REQUIRED) {
-                for (uint8_t i = 0; i < TT_FLICKS_REQUIRED - 1; i++)
+            if (ttFlickCount >= req) {
+                for (uint8_t i = 0; i < req - 1; i++)
                     ttFlickTimestamps[i] = ttFlickTimestamps[i + 1];
-                idx = TT_FLICKS_REQUIRED - 1;
+                idx = req - 1;
             }
             ttFlickTimestamps[idx] = ttSampleCounter;
-            if (ttFlickCount < TT_FLICKS_REQUIRED) ttFlickCount++;
+            if (ttFlickCount < req) ttFlickCount++;
 
-            // Check if we have 4 flicks within the time window
-            if (ttFlickCount >= TT_FLICKS_REQUIRED) {
+            // Check if we have enough flicks within the time window
+            if (ttFlickCount >= req) {
                 uint32_t oldest = ttFlickTimestamps[0];
-                uint32_t newest = ttFlickTimestamps[TT_FLICKS_REQUIRED - 1];
-                if ((newest - oldest) <= TT_FLICK_WINDOW) {
+                uint32_t newest = ttFlickTimestamps[req - 1];
+                uint32_t window = (uint32_t)req * TT_FLICK_PER_FLICK;
+                if ((newest - oldest) <= window) {
                     // Enter tap tempo mode!
                     ttFlickCount = 0;
                     ttState = TT_ANNOUNCE;
@@ -1805,13 +1811,22 @@ class Robodub : public ComputerCard
             break;
 
         case TT_WAIT_TAP:
-            // Check for abort: Switch::Up restarts
+            // Switch::Up: abort if no taps yet, restart if mid-sequence.
+            // This prevents the announce cue looping forever when the
+            // flick gesture ends with the switch on Up.
             if (sw == Switch::Up) {
-                ttState = TT_ANNOUNCE;
-                ttTapCount = 0;
-                ttInactivityTimer = 0;
-                ttLastSwitchDown = false;
-                tt_start_sequence(TT_SEQ_ANNOUNCE, TT_SEQ_ANNOUNCE_LEN);
+                if (ttTapCount == 0) {
+                    // No taps collected — just exit cleanly
+                    ttState = TT_OFF;
+                    ttTonePhaseInc = 0;
+                } else {
+                    // Some taps collected — restart so user can re-tap
+                    ttState = TT_ANNOUNCE;
+                    ttTapCount = 0;
+                    ttInactivityTimer = 0;
+                    ttLastSwitchDown = false;
+                    tt_start_sequence(TT_SEQ_ANNOUNCE, TT_SEQ_ANNOUNCE_LEN);
+                }
                 break;
             }
 
@@ -1850,13 +1865,19 @@ class Robodub : public ComputerCard
             break;
 
         case TT_PLAY_TONE:
-            // Check for abort: Switch::Up restarts
+            // Switch::Up during tone: abort if only 1 tap (accidental),
+            // restart if multiple taps collected (intentional re-tap).
             if (sw == Switch::Up) {
-                ttState = TT_ANNOUNCE;
-                ttTapCount = 0;
-                ttInactivityTimer = 0;
-                ttLastSwitchDown = false;
-                tt_start_sequence(TT_SEQ_ANNOUNCE, TT_SEQ_ANNOUNCE_LEN);
+                if (ttTapCount <= 1) {
+                    ttState = TT_OFF;
+                    ttTonePhaseInc = 0;
+                } else {
+                    ttState = TT_ANNOUNCE;
+                    ttTapCount = 0;
+                    ttInactivityTimer = 0;
+                    ttLastSwitchDown = false;
+                    tt_start_sequence(TT_SEQ_ANNOUNCE, TT_SEQ_ANNOUNCE_LEN);
+                }
                 break;
             }
 
@@ -1951,6 +1972,8 @@ public:
             config.metronomeVolume = 7;
         if (config.warbleLevel > 5)
             config.warbleLevel = 4;
+        if (config.ttFlicksRequired < 2 || config.ttFlicksRequired > 6)
+            config.ttFlicksRequired = 3;
 
         dryPassthrough = (config.dryPassthrough != 0);
         ttMetronomeVolume = config.metronomeVolume;
@@ -2039,6 +2062,7 @@ public:
         usbState.metronomeVolPtr = &ttMetronomeVolume;
         usbState.wowDepthMulPtr = &wowDepthMul;
         usbState.debugFlagsPtr = &debugFlags;
+        usbState.ttFlicksPtr = &ttFlicksRequired;
         usbState.configPtr = &config;
         g_usb_state = &usbState;
 
@@ -2050,7 +2074,8 @@ public:
         ttFlickCount = 0;
         ttFlickDebounce = 0;
         ttSampleCounter = 0;
-        for (int i = 0; i < 3; i++) ttFlickTimestamps[i] = 0;
+        for (int i = 0; i < TT_FLICKS_MAX; i++) ttFlickTimestamps[i] = 0;
+        ttFlicksRequired = config.ttFlicksRequired;
         ttTonePhase = 0;
         ttTonePhaseInc = 0;
         ttToneTimer = 0;
@@ -2827,9 +2852,16 @@ public:
             }
         } // end compressor bypass check
 
-        // Mix metronome tone during tap tempo (mono, both channels)
+        // Mix metronome tone during tap tempo (mono, both channels).
+        // Duck the delay output to make room for the tone — prevents
+        // hard clipping when the delay is already loud.
         if (ttState != TT_OFF) {
             int32_t tone = tt_generate_tone();
+            if (tone != 0) {
+                // Attenuate delay output by ~50% while tone is active
+                outL = outL >> 1;
+                outR = outR >> 1;
+            }
             outL += tone;
             outR += tone;
         }
@@ -3053,7 +3085,8 @@ static void send_config_state(SharedUSBState *usb)
         usb->configPtr->dryPassthrough,
         usb->configPtr->metronomeVolume,
         usb->configPtr->warbleLevel,
-        *usb->debugFlagsPtr
+        *usb->debugFlagsPtr,
+        usb->configPtr->ttFlicksRequired
     };
     send_sysex(msg, sizeof(msg));
 }
@@ -3120,6 +3153,15 @@ static void process_incoming_sysex(const uint8_t *data, uint32_t size,
         {
             // Only bits 0-3 are valid; mask off anything else
             *usb->debugFlagsPtr = data[1] & 0x0F;
+            send_config_state(usb);
+        }
+        break;
+
+    case SYSEX_SET_TT_FLICKS:
+        if (size == 2 && data[1] >= 2 && data[1] <= 6)
+        {
+            usb->configPtr->ttFlicksRequired = data[1];
+            *usb->ttFlicksPtr = data[1];
             send_config_state(usb);
         }
         break;

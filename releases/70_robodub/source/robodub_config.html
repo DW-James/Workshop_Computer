@@ -361,6 +361,7 @@
       const SYSEX_SET_METRONOME_VOLUME  = 0x05;
       const SYSEX_SET_WARBLE_LEVEL      = 0x06;
       const SYSEX_SET_DEBUG_FLAGS       = 0x07;
+      const SYSEX_SET_TT_FLICKS        = 0x08;
       const SYSEX_FIRMWARE_VERSION      = 0x10;
 
       // Debug flags bitfield (matches firmware DBG_BYPASS_* constants)
@@ -398,6 +399,7 @@
         document.getElementById('dryPassthroughToggle').disabled = !enabled;
         document.getElementById('metronomeSlider').disabled = !enabled;
         document.getElementById('warbleSlider').disabled = !enabled;
+        document.getElementById('flicksSlider').disabled = !enabled;
         document.getElementById('saveBtn').disabled = !enabled;
         document.getElementById('dbgSidechain').disabled = !enabled;
         document.getElementById('dbgCompressor').disabled = !enabled;
@@ -434,6 +436,14 @@
           if (dataBytes.length >= 5)
           {
             updateDebugToggles(dataBytes[4]);
+          }
+
+          // Tap tempo flick count (2-6)
+          if (dataBytes.length >= 6)
+          {
+            var flicks = dataBytes[5];
+            document.getElementById('flicksSlider').value = flicks;
+            document.getElementById('flicksValue').textContent = flicks;
           }
         }
 
@@ -505,6 +515,13 @@
           val + '/5 — ' + warbleLabels[val];
       }
 
+      function onFlicksChange()
+      {
+        var val = parseInt(document.getElementById('flicksSlider').value);
+        document.getElementById('flicksValue').textContent = val;
+        SendSysEx([SYSEX_SET_TT_FLICKS, val]);
+      }
+
       function onDebugToggle()
       {
         debugFlags = 0;
@@ -569,7 +586,7 @@
       </div>
 
       <div class="card">
-        <h2>Tap Tempo Metronome</h2>
+        <h2>Tap Tempo</h2>
         <p>Volume of the metronome tones during tap tempo entry.</p>
         <div class="slider-row">
           <div class="slider-header">
@@ -581,6 +598,19 @@
           <div class="slider-labels">
             <span>Quiet</span>
             <span>Loud</span>
+          </div>
+        </div>
+        <p style="margin-top: 12px;">Number of Up/Middle switch flicks to enter tap tempo mode.</p>
+        <div class="slider-row">
+          <div class="slider-header">
+            <span class="slider-label">Flicks to activate</span>
+            <span id="flicksValue" class="slider-value">3</span>
+          </div>
+          <input type="range" id="flicksSlider" min="2" max="6" value="3"
+                 disabled oninput="onFlicksChange()">
+          <div class="slider-labels">
+            <span>Easy</span>
+            <span>Hard</span>
           </div>
         </div>
       </div>
