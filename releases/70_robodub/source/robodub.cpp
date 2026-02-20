@@ -2404,12 +2404,18 @@ public:
         }
 
         // ADC crosstalk blank: zero delay input while countdown is active.
-        // Applied after all switch/LPG logic so it cleanly overrides.
-        if (switchBlankCount > 0)
+        // Skip if the LPG gate is still releasing — the release tail is
+        // a smooth fade that shouldn't be interrupted (that causes static).
+        if (switchBlankCount > 0 && gateEnvelope == 0)
         {
             delayInputL = 0;
             delayInputR = 0;
             switchBlankCount--;
+        }
+        else if (switchBlankCount > 0 && gateEnvelope > 0)
+        {
+            // LPG is handling the transition smoothly — cancel the blank.
+            switchBlankCount = 0;
         }
 
         // ---- Feedback amount (Main knob, custom curve) ----
