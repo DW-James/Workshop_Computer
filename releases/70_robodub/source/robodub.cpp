@@ -213,7 +213,19 @@ static constexpr uint8_t SYSEX_REQUEST_CONFIG        = 0x03; // web → firmware
 static constexpr uint8_t SYSEX_CONFIG_STATE          = 0x04; // firmware → web: [0x04, dryPassthrough, metroVol, warbleLevel]
 static constexpr uint8_t SYSEX_SET_METRONOME_VOLUME  = 0x05; // web → firmware: [0x05, 1-10]
 static constexpr uint8_t SYSEX_SET_WARBLE_LEVEL      = 0x06; // web → firmware: [0x06, 1-5]
+static constexpr uint8_t SYSEX_SET_DEBUG_FLAGS        = 0x07; // web → firmware: [0x07, flags_byte]
 static constexpr uint8_t SYSEX_FIRMWARE_VERSION      = 0x10; // firmware → web: [0x10, maj, min, patch]
+
+// Debug flags bitfield (SYSEX_SET_DEBUG_FLAGS payload byte):
+//   bit 0: bypass sidechain ducking (core 1 stops writing duck_gain)
+//   bit 1: bypass output compressor (all band gains forced to unity)
+//   bit 2: bypass cross-feed (no stereo bleed in feedback loop)
+//   bit 3: bypass feedback filters (LPF, HPF, resonance dips)
+// These are runtime-only diagnostic toggles — NOT saved to flash.
+static constexpr uint8_t DBG_BYPASS_SIDECHAIN   = 0x01;
+static constexpr uint8_t DBG_BYPASS_COMPRESSOR   = 0x02;
+static constexpr uint8_t DBG_BYPASS_CROSSFEED    = 0x04;
+static constexpr uint8_t DBG_BYPASS_FB_FILTERS   = 0x08;
 
 // SysEx parsing buffer (512 bytes max, same as web_interface example)
 static constexpr unsigned SYSEX_BUF_SIZE = 512;
@@ -811,6 +823,7 @@ struct SharedUSBState {
     volatile bool *dryPassthroughPtr;   // Points to Robodub::dryPassthrough
     volatile uint8_t *metronomeVolPtr;  // Points to Robodub::ttMetronomeVolume
     volatile int32_t *wowDepthMulPtr;   // Points to Robodub::wowDepthMul
+    volatile uint8_t *debugFlagsPtr;    // Points to Robodub::debugFlags
     RobodubConfig *configPtr;           // Points to Robodub::config (for save)
 };
 
@@ -1015,6 +1028,18 @@ static inline void __not_in_flash_func(samplebuf_write)(SampleBuffer *sb, int16_
 
     if (sb->writePos < sb->maxFrames)
     {
+        // Fade-out the last 64 frames of the buffer so the stored
+        // waveform tapers to zero if the buffer fills up mid-signal.
+        // Without this, a hard truncation mid-waveform creates a click
+        // on playback at the end of the sample.
+        uint32_t remaining = sb->maxFrames - sb->writePos;
+        if (remaining < 64)
+        {
+            int32_t fade = (int32_t)remaining;  // 63→0
+            sampleL = (int16_t)(((int32_t)sampleL * fade) >> 6);
+            sampleR = (int16_t)(((int32_t)sampleR * fade) >> 6);
+        }
+
         if (sb->stereo)
         {
             uint32_t idx = sb->writePos << 1;  // 2 samples per frame
@@ -1216,7 +1241,32 @@ static inline void samplebuf_start_capture(SampleBuffer *sb, bool stereo)
 static inline void samplebuf_stop_capture(SampleBuffer *sb)
 {
     sb->capturing = false;
-    if (sb->length > 0) sb->hasContent = true;
+    if (sb->length > 0)
+    {
+        sb->hasContent = true;
+
+        // Fade out the last 64 frames so the stored waveform tapers to
+        // zero instead of truncating mid-cycle. This prevents a click
+        // at the end of playback when the sample was captured by a
+        // brief switch hold that didn't fill the whole buffer.
+        uint32_t fadeLen = 64;
+        if (fadeLen > sb->length) fadeLen = sb->length;
+        for (uint32_t i = 0; i < fadeLen; i++)
+        {
+            uint32_t pos = sb->length - fadeLen + i;
+            int32_t mul = (int32_t)(fadeLen - 1 - i);  // fadeLen-1 → 0
+            if (sb->stereo)
+            {
+                uint32_t idx = pos << 1;
+                sb->data[idx]     = (int16_t)(((int32_t)sb->data[idx]     * mul) >> 6);
+                sb->data[idx + 1] = (int16_t)(((int32_t)sb->data[idx + 1] * mul) >> 6);
+            }
+            else
+            {
+                sb->data[pos] = (int16_t)(((int32_t)sb->data[pos] * mul) >> 6);
+            }
+        }
+    }
 }
 
 // Trigger sample playback. Speed and direction are set by the chaos
@@ -1445,12 +1495,13 @@ class Robodub : public ComputerCard
 
     // Warble level → wow depth multiplier lookup.
     // sine_lookup returns ±4096. Multiply by this value to get depth in 16.16 samples.
-    // Level 1 (clean):  ×256  → ±16 samples = ±0.33ms ≈ ±6 cents  (barely perceptible)
+    // Level 0 (none):    ×0    → no modulation at all (also disables tape glitches)
+    // Level 1 (clean):   ×256  → ±16 samples = ±0.33ms ≈ ±6 cents  (barely perceptible)
     // Level 2 (subtle):  ×768  → ±48 samples = ±1.0ms  ≈ ±13 cents (gentle chorusing)
     // Level 3 (moderate): ×1280 → ±80 samples = ±1.67ms ≈ ±18 cents (warm wobble)
     // Level 4 (woozy):   ×2048 → ±128 samples = ±2.67ms ≈ ±29 cents (current default)
     // Level 5 (seasick): ×3072 → ±192 samples = ±4.0ms  ≈ ±43 cents (extreme)
-    static constexpr int32_t WARBLE_DEPTH_LUT[5] = { 256, 768, 1280, 2048, 3072 };
+    static constexpr int32_t WARBLE_DEPTH_LUT[6] = { 0, 256, 768, 1280, 2048, 3072 };
 
     // --- Tape glitch (random transport irregularities) ---
     // Models occasional tape slips, sticky capstans, worn rollers —
@@ -1482,7 +1533,16 @@ class Robodub : public ComputerCard
     // --- Sample buffer ---
     SampleBuffer sampleBuf;
     bool lastSwitchDown;       // Track switch transitions
-    int32_t gateEnvelope;      // Fade-in/out for Switch::Down input (0-64)
+
+    // --- LPG-style gate envelope ---
+    // Approximates a vactrol low-pass gate: envelope controls both
+    // amplitude (VCA) and filter cutoff (LPF) simultaneously.
+    // Fast attack (~1ms), slower exponential release (~15ms).
+    // When it closes, the signal gets darker AND quieter — the
+    // characteristic "plonky" Buchla 292 sound.
+    int32_t gateEnvelope;      // 0-4096 (Q12). 0=closed, 4096=fully open
+    OnePole lpgFilterL;        // LPG lowpass filter, left channel
+    OnePole lpgFilterR;        // LPG lowpass filter, right channel
     bool lastPulse2;           // Track Pulse In 2 edges
     uint32_t pulse2Lockout;    // Debounce: counts down after a trigger, blocks re-triggers
 
@@ -1511,6 +1571,9 @@ class Robodub : public ComputerCard
 
     // --- Sidechain ducking (core 1) ---
     SharedSidechain sidechain;
+
+    // --- Debug / diagnostics flags (runtime-only, not saved to flash) ---
+    volatile uint8_t debugFlags;   // Bitfield: see DBG_BYPASS_* constants
 
     // --- Flash-persistent configuration ---
     RobodubConfig config;          // Current config (loaded from flash on boot)
@@ -1886,12 +1949,12 @@ public:
         // Validate and clamp loaded values (guards against corrupt flash)
         if (config.metronomeVolume < 1 || config.metronomeVolume > 10)
             config.metronomeVolume = 7;
-        if (config.warbleLevel < 1 || config.warbleLevel > 5)
+        if (config.warbleLevel > 5)
             config.warbleLevel = 4;
 
         dryPassthrough = (config.dryPassthrough != 0);
         ttMetronomeVolume = config.metronomeVolume;
-        wowDepthMul = WARBLE_DEPTH_LUT[config.warbleLevel - 1];
+        wowDepthMul = WARBLE_DEPTH_LUT[config.warbleLevel];
         dryL = 0;
         dryR = 0;
         filter_init(&inputHPF);
@@ -1935,6 +1998,8 @@ public:
         samplebuf_init(&sampleBuf);
         lastSwitchDown = false;
         gateEnvelope = 0;
+        filter_init(&lpgFilterL);
+        filter_init(&lpgFilterR);
         lastPulse2 = false;
         pulse2Lockout = 0;
 
@@ -1966,10 +2031,14 @@ public:
 
         g_sidechain = &sidechain;
 
+        // Debug flags — all off at startup (no bypasses)
+        debugFlags = 0;
+
         // USB MIDI state — pointers into this class for core 1 SysEx handler
         usbState.dryPassthroughPtr = &dryPassthrough;
         usbState.metronomeVolPtr = &ttMetronomeVolume;
         usbState.wowDepthMulPtr = &wowDepthMul;
+        usbState.debugFlagsPtr = &debugFlags;
         usbState.configPtr = &config;
         g_usb_state = &usbState;
 
@@ -2193,20 +2262,31 @@ public:
                 samplebuf_start_capture(&sampleBuf, stereoInput);
                 sampleTrigFlash = 4800;  // Flash LED 3 on capture start
             }
-            // Capture L/R in stereo mode, or just L in mono
-            if (sampleBuf.capturing) samplebuf_write(&sampleBuf, (int16_t)filteredL, (int16_t)filteredR);
-            // Fade-in: ramp gate envelope up over 64 samples (~1.3ms)
-            if (gateEnvelope < 64) gateEnvelope++;
-            // Feed stereo L/R to delay (in mono mode, filteredL == filteredR)
-            delayInputL = (filteredL * gateEnvelope) >> 6;
-            delayInputR = (filteredR * gateEnvelope) >> 6;
+            // LPG attack: fast exponential rise (~1ms).
+            // Coefficient 6554 ≈ 10% of range per sample → ~1ms to 90%.
+            gateEnvelope += ((4096 - gateEnvelope) * 6554 + 32768) >> 16;
+
+            // LPG: envelope controls both VCA and LPF cutoff.
+            // Filter coefficient tracks envelope: fully open (4096) → coeff ~60000
+            // (~10kHz), closed (0) → coeff 0 (DC). This maps the 0-4096 envelope
+            // to a 0-60000 filter coefficient range (multiply by ~15).
+            {
+                int32_t lpgCoeff = (gateEnvelope * 15);  // 0→~61440
+                int32_t vcaL = (filteredL * gateEnvelope) >> 12;
+                int32_t vcaR = (filteredR * gateEnvelope) >> 12;
+                delayInputL = filter_lp(&lpgFilterL, lpgCoeff, vcaL);
+                delayInputR = filter_lp(&lpgFilterR, lpgCoeff, vcaR);
+            }
+            // Capture LPG-shaped signal so the saved sample has the
+            // vactrol attack character baked in (plonky onset)
+            if (sampleBuf.capturing) samplebuf_write(&sampleBuf, (int16_t)delayInputL, (int16_t)delayInputR);
         }
         else if (switchPos == Switch::Middle)
         {
-            // Locked sample mode: stop any active capture, then
-            // replay the stored sample on each Pulse In 2 trigger
-            if (sampleBuf.capturing) samplebuf_stop_capture(&sampleBuf);
-            if (pulse2Rising && density_check(chaosKnob))
+            // Locked sample mode: replay the stored sample on Pulse In 2.
+            // Note: capture may still be running during LPG release tail —
+            // don't stop it here; it's finalised when the gate closes below.
+            if (pulse2Rising && !sampleBuf.capturing && density_check(chaosKnob))
             {
                 chaos_roll(&sampleBuf, chaosKnob);
                 samplebuf_trigger_play(&sampleBuf);
@@ -2245,11 +2325,36 @@ public:
         }
         lastSwitchDown = (switchPos == Switch::Down);
 
-        // Reset gate envelope when switch leaves Down.
-        // No fade-out needed — the delay buffer already contains the audio,
-        // so dropping delayInput to 0 doesn't create an audible discontinuity
-        // at the output. The fade-in on press is what matters for clean entry.
-        if (switchPos != Switch::Down) gateEnvelope = 0;
+        // LPG release: when switch leaves Down, exponential decay (~15ms).
+        // Coefficient 2621 ≈ 4% per sample → ~15ms to -40dB (vactrol droop).
+        // The fading signal runs through the same LPG (VCA + LPF) so it
+        // gets darker as it gets quieter — the characteristic plonky tail.
+        // The release tail is also written to the sample buffer so the
+        // saved sample has the full vactrol character baked in.
+        if (switchPos != Switch::Down && gateEnvelope > 0)
+        {
+            gateEnvelope -= (gateEnvelope * 2621 + 32768) >> 16;
+            if (gateEnvelope < 2) gateEnvelope = 0;  // snap to zero at -66dB
+
+            if (gateEnvelope > 0)
+            {
+                int32_t lpgCoeff = (gateEnvelope * 15);
+                int32_t vcaL = (filteredL * gateEnvelope) >> 12;
+                int32_t vcaR = (filteredR * gateEnvelope) >> 12;
+                delayInputL += filter_lp(&lpgFilterL, lpgCoeff, vcaL);
+                delayInputR += filter_lp(&lpgFilterR, lpgCoeff, vcaR);
+                // Continue capturing the LPG release tail into sample buffer
+                if (sampleBuf.capturing) samplebuf_write(&sampleBuf, (int16_t)delayInputL, (int16_t)delayInputR);
+            }
+            else
+            {
+                // Gate fully closed — finalise sample capture and zero
+                // the filter state to prevent stale DC leaking on reopen.
+                if (sampleBuf.capturing) samplebuf_stop_capture(&sampleBuf);
+                filter_init(&lpgFilterL);
+                filter_init(&lpgFilterR);
+            }
+        }
 
         // ---- Feedback amount (Main knob, custom curve) ----
         int32_t fbAmount = get_feedback(mainKnob);
@@ -2312,8 +2417,8 @@ public:
         //   at max bloom (1085): most frequent → ~1 in 58 checks → ~5s avg
         {
             uint32_t glitchChance;
-            if (fbAmount < 512)
-                glitchChance = 0;  // No glitches below ~50% feedback
+            if (wowDepthMul == 0 || fbAmount < 512)
+                glitchChance = 0;  // No glitches when warble=None or below ~50% feedback
             else if (fbAmount < 1024)
                 glitchChance = (uint32_t)(fbAmount - 512) / 72;  // 0→7
             else
@@ -2441,48 +2546,51 @@ public:
         feedbackL = (delOutL * fbAmount) >> 10;
         feedbackR = (delOutR * fbAmount) >> 10;
 
-        // Lowpass filter in the feedback loop: darkens each repeat,
-        // simulating tape head high-frequency loss. Coefficient 62800
-        // gives a cutoff around ~12kHz. This is set higher than a
-        // typical tape (~8kHz) to compensate for the additional HF
-        // loss introduced by the wow modulation — the interpolating
-        // delay read acts as a mild lowpass when the read position
-        // is moving, so the combined effect still sounds like natural
-        // tape darkening without getting muddy.
-        feedbackL = filter_lp(&feedbackLPF_L, 62800, feedbackL);
-        feedbackR = filter_lp(&feedbackLPF_R, 62800, feedbackR);
-
-        // Highpass filter in the feedback loop prevents low-frequency
-        // rumble from accumulating. The wow modulation shifts energy
-        // downward on each pass, and without this filter the bass
-        // builds into a muddy pulsing throb. Coefficient 1022 gives
-        // a cutoff around ~120Hz — clears out the sub-bass rumble
-        // while leaving kick drums and bass notes intact.
-        feedbackL = filter_hp(&dcBlockL, 1022, feedbackL);
-        feedbackR = filter_hp(&dcBlockR, 1022, feedbackR);
-
-        // Two narrow dips to tame resonant peaks from cumulative
-        // LP+HP phase shift in the feedback loop.
-        // Dip 1: fundamental at ~1178Hz (bandpass 1100-1260Hz, 20%)
-        // Dip 2: 2nd harmonic at ~2360Hz (bandpass 2100-2700Hz, 15%)
-        // Coefficients: 10155≈1260Hz, 8886≈1100Hz, 20525≈2700Hz, 16277≈2100Hz
+        if (!(debugFlags & DBG_BYPASS_FB_FILTERS))
         {
-            int32_t hiL = filter_lp(&dipHi_L, 10155, feedbackL);
-            int32_t loL = filter_lp(&dipLo_L, 8886, feedbackL);
-            feedbackL -= ((hiL - loL) * 205) >> 10;  // 205/1024 ≈ 20%
+            // Lowpass filter in the feedback loop: darkens each repeat,
+            // simulating tape head high-frequency loss. Coefficient 62800
+            // gives a cutoff around ~12kHz. This is set higher than a
+            // typical tape (~8kHz) to compensate for the additional HF
+            // loss introduced by the wow modulation — the interpolating
+            // delay read acts as a mild lowpass when the read position
+            // is moving, so the combined effect still sounds like natural
+            // tape darkening without getting muddy.
+            feedbackL = filter_lp(&feedbackLPF_L, 62800, feedbackL);
+            feedbackR = filter_lp(&feedbackLPF_R, 62800, feedbackR);
 
-            int32_t hiR = filter_lp(&dipHi_R, 10155, feedbackR);
-            int32_t loR = filter_lp(&dipLo_R, 8886, feedbackR);
-            feedbackR -= ((hiR - loR) * 205) >> 10;
-        }
-        {
-            int32_t hiL = filter_lp(&dip2Hi_L, 20525, feedbackL);
-            int32_t loL = filter_lp(&dip2Lo_L, 16277, feedbackL);
-            feedbackL -= ((hiL - loL) * 154) >> 10;
+            // Highpass filter in the feedback loop prevents low-frequency
+            // rumble from accumulating. The wow modulation shifts energy
+            // downward on each pass, and without this filter the bass
+            // builds into a muddy pulsing throb. Coefficient 1022 gives
+            // a cutoff around ~120Hz — clears out the sub-bass rumble
+            // while leaving kick drums and bass notes intact.
+            feedbackL = filter_hp(&dcBlockL, 1022, feedbackL);
+            feedbackR = filter_hp(&dcBlockR, 1022, feedbackR);
 
-            int32_t hiR = filter_lp(&dip2Hi_R, 20525, feedbackR);
-            int32_t loR = filter_lp(&dip2Lo_R, 16277, feedbackR);
-            feedbackR -= ((hiR - loR) * 154) >> 10;
+            // Two narrow dips to tame resonant peaks from cumulative
+            // LP+HP phase shift in the feedback loop.
+            // Dip 1: fundamental at ~1178Hz (bandpass 1100-1260Hz, 20%)
+            // Dip 2: 2nd harmonic at ~2360Hz (bandpass 2100-2700Hz, 15%)
+            // Coefficients: 10155≈1260Hz, 8886≈1100Hz, 20525≈2700Hz, 16277≈2100Hz
+            {
+                int32_t hiL = filter_lp(&dipHi_L, 10155, feedbackL);
+                int32_t loL = filter_lp(&dipLo_L, 8886, feedbackL);
+                feedbackL -= ((hiL - loL) * 205) >> 10;  // 205/1024 ≈ 20%
+
+                int32_t hiR = filter_lp(&dipHi_R, 10155, feedbackR);
+                int32_t loR = filter_lp(&dipLo_R, 8886, feedbackR);
+                feedbackR -= ((hiR - loR) * 205) >> 10;
+            }
+            {
+                int32_t hiL = filter_lp(&dip2Hi_L, 20525, feedbackL);
+                int32_t loL = filter_lp(&dip2Lo_L, 16277, feedbackL);
+                feedbackL -= ((hiL - loL) * 154) >> 10;
+
+                int32_t hiR = filter_lp(&dip2Hi_R, 20525, feedbackR);
+                int32_t loR = filter_lp(&dip2Lo_R, 16277, feedbackR);
+                feedbackR -= ((hiR - loR) * 154) >> 10;
+            }
         }
 
         // ---- Write to delay ----
@@ -2500,8 +2608,10 @@ public:
         // headroom before clipping. Subtle enough to not affect first repeat.
         int32_t inputScaledL = (delayInputL * 810) >> 10;
         int32_t inputScaledR = (delayInputR * 810) >> 10;
-        int32_t writeL = clamp(inputScaledL + feedbackL + (feedbackR >> 5), -2047, 2047);
-        int32_t writeR = clamp(inputScaledR + feedbackR + (feedbackL >> 5), -2047, 2047);
+        int32_t xfeedL = (debugFlags & DBG_BYPASS_CROSSFEED) ? 0 : (feedbackR >> 5);
+        int32_t xfeedR = (debugFlags & DBG_BYPASS_CROSSFEED) ? 0 : (feedbackL >> 5);
+        int32_t writeL = clamp(inputScaledL + feedbackL + xfeedL, -2047, 2047);
+        int32_t writeR = clamp(inputScaledR + feedbackR + xfeedR, -2047, 2047);
         delay_write(&delayL, (int16_t)writeL);
         delay_write(&delayR, (int16_t)writeR);
 
@@ -2644,50 +2754,55 @@ public:
                 // audible — ring mod adds texture on top, not instead.
                 outL = ((outL * dryMix) >> 12) + ((wetL * ringAmount) >> 12);
                 outR = ((outR * dryMix) >> 12) + ((wetR * ringAmount) >> 12);
+                // Clamp: dry+wet blend can exceed ±2047 at mid-Y (~125% total)
+                outL = clamp(outL, -2047, 2047);
+                outR = clamp(outR, -2047, 2047);
             }
         }
 
         // ---- 8-band multiband compressor (output only) ----
         // Gain computation runs decimated (every 10 samples ≈ 4.8kHz).
         // Band splitting + gain application runs every sample.
+        if (!(debugFlags & DBG_BYPASS_COMPRESSOR))
         {
-            mb.decimCounter++;
-            if (mb.decimCounter >= MULTIBAND_DECIM)
             {
-                mb.decimCounter = 0;
-                int32_t wetMono = (clamp(outL, -2047, 2047) + clamp(outR, -2047, 2047)) >> 1;
-                multiband_update_gains(&mb, wetMono);
+                mb.decimCounter++;
+                if (mb.decimCounter >= MULTIBAND_DECIM)
+                {
+                    mb.decimCounter = 0;
+                    int32_t wetMono = (clamp(outL, -2047, 2047) + clamp(outR, -2047, 2047)) >> 1;
+                    multiband_update_gains(&mb, wetMono);
+                }
             }
-        }
 
-        // Split wet stereo into 8 bands, apply per-band gain, recombine.
-        // Serial subtraction: band[i] = LP(residual), residual -= band[i].
-        // All bands sum back to exactly the original signal at unity gain.
-        // Combined gain = compressor gain × sidechain duck gain (both Q10).
-        {
-            int32_t finalL = 0, finalR = 0;
-            int32_t residualL = outL;
-            int32_t residualR = outR;
-
-            for (int i = 0; i < NUM_CROSSOVERS; i++)
+            // Split wet stereo into 8 bands, apply per-band gain, recombine.
+            // Serial subtraction: band[i] = LP(residual), residual -= band[i].
+            // All bands sum back to exactly the original signal at unity gain.
+            // Combined gain = compressor gain × sidechain duck gain (both Q10).
             {
-                int32_t bandL = filter_lp(&mb.wet_filters_L.crossover[i],
-                                           crossover_coeffs[i], residualL);
-                int32_t bandR = filter_lp(&mb.wet_filters_R.crossover[i],
-                                           crossover_coeffs[i], residualR);
-                residualL -= bandL;
-                residualR -= bandR;
+                int32_t finalL = 0, finalR = 0;
+                int32_t residualL = outL;
+                int32_t residualR = outR;
 
-                // Combine compressor + sidechain gains (both Q10, multiply → Q20, shift back)
-                int32_t comp_g = mb.band_gain[i];
-                int32_t duck_g = sidechain.duck_gain[i];
-                int32_t combined = (comp_g * duck_g) >> 10;
+                for (int i = 0; i < NUM_CROSSOVERS; i++)
+                {
+                    int32_t bandL = filter_lp(&mb.wet_filters_L.crossover[i],
+                                               crossover_coeffs[i], residualL);
+                    int32_t bandR = filter_lp(&mb.wet_filters_R.crossover[i],
+                                               crossover_coeffs[i], residualR);
+                    residualL -= bandL;
+                    residualR -= bandR;
 
-                // Smooth the combined gain to prevent zipper noise (~1ms)
-                int32_t g = filter_lp(&mb.gain_smooth[i], GAIN_SMOOTH_COEFF,
-                                       combined);
-                finalL += (bandL * g) >> 10;
-                finalR += (bandR * g) >> 10;
+                    // Combine compressor + sidechain gains (both Q10, multiply → Q20, shift back)
+                    int32_t comp_g = mb.band_gain[i];
+                    int32_t duck_g = sidechain.duck_gain[i];
+                    int32_t combined = (comp_g * duck_g) >> 10;
+
+                    // Smooth the combined gain to prevent zipper noise (~1ms)
+                    int32_t g = filter_lp(&mb.gain_smooth[i], GAIN_SMOOTH_COEFF,
+                                           combined);
+                    finalL += (bandL * g) >> 10;
+                    finalR += (bandR * g) >> 10;
             }
             // Last band = residual (everything above 12kHz)
             {
@@ -2701,9 +2816,14 @@ public:
                 finalR += (residualR * g) >> 10;
             }
 
-            outL = finalL;
-            outR = finalR;
-        }
+                // Clamp multiband output — makeup gains can push the
+                // band sum well above ±2047 (up to ±32k worst case).
+                // Without this, overflowed values feed back into the
+                // delay and compound into persistent digital distortion.
+                outL = clamp(finalL, -2047, 2047);
+                outR = clamp(finalR, -2047, 2047);
+            }
+        } // end compressor bypass check
 
         // Mix metronome tone during tap tempo (mono, both channels)
         if (ttState != TT_OFF) {
@@ -2921,7 +3041,8 @@ static void send_config_state(SharedUSBState *usb)
         SYSEX_CONFIG_STATE,
         usb->configPtr->dryPassthrough,
         usb->configPtr->metronomeVolume,
-        usb->configPtr->warbleLevel
+        usb->configPtr->warbleLevel,
+        *usb->debugFlagsPtr
     };
     send_sysex(msg, sizeof(msg));
 }
@@ -2972,14 +3093,22 @@ static void process_incoming_sysex(const uint8_t *data, uint32_t size,
         break;
 
     case SYSEX_SET_WARBLE_LEVEL:
-        if (size == 2 && data[1] >= 1 && data[1] <= 5)
+        if (size == 2 && data[1] <= 5)
         {
             usb->configPtr->warbleLevel = data[1];
             // Update the depth multiplier used by the ISR on core 0.
-            // WARBLE_DEPTH_LUT is a constexpr array in the Robodub class,
-            // but the values are known: {256, 768, 1280, 2048, 3072}.
-            static constexpr int32_t lut[5] = { 256, 768, 1280, 2048, 3072 };
-            *usb->wowDepthMulPtr = lut[data[1] - 1];
+            // Level 0 = no modulation; levels 1-5 = increasing depth.
+            static constexpr int32_t lut[6] = { 0, 256, 768, 1280, 2048, 3072 };
+            *usb->wowDepthMulPtr = lut[data[1]];
+            send_config_state(usb);
+        }
+        break;
+
+    case SYSEX_SET_DEBUG_FLAGS:
+        if (size == 2)
+        {
+            // Only bits 0-3 are valid; mask off anything else
+            *usb->debugFlagsPtr = data[1] & 0x0F;
             send_config_state(usb);
         }
         break;
@@ -3095,6 +3224,14 @@ static void core1_sidechain_entry()
         uint32_t elapsed = tick - state.last_tick;
         if (elapsed < SC_DECIM) continue;
         state.last_tick = tick;
+
+        // Debug: bypass sidechain — force all duck gains to unity
+        if (*usb->debugFlagsPtr & DBG_BYPASS_SIDECHAIN)
+        {
+            for (int i = 0; i < NUM_BANDS; i++)
+                sc->duck_gain[i] = 1024;
+            continue;
+        }
 
         // Read dry mono from shared state
         int32_t dry_mono = sc->dry_mono;

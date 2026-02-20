@@ -354,7 +354,14 @@
       const SYSEX_CONFIG_STATE          = 0x04;
       const SYSEX_SET_METRONOME_VOLUME  = 0x05;
       const SYSEX_SET_WARBLE_LEVEL      = 0x06;
+      const SYSEX_SET_DEBUG_FLAGS       = 0x07;
       const SYSEX_FIRMWARE_VERSION      = 0x10;
+
+      // Debug flags bitfield (matches firmware DBG_BYPASS_* constants)
+      const DBG_BYPASS_SIDECHAIN  = 0x01;
+      const DBG_BYPASS_COMPRESSOR = 0x02;
+      const DBG_BYPASS_CROSSFEED  = 0x04;
+      const DBG_BYPASS_FB_FILTERS = 0x08;
 
       var firmwareMajor = 0, firmwareMinor = 0, firmwarePatch = 0;
 
@@ -386,6 +393,10 @@
         document.getElementById('metronomeSlider').disabled = !enabled;
         document.getElementById('warbleSlider').disabled = !enabled;
         document.getElementById('saveBtn').disabled = !enabled;
+        document.getElementById('dbgSidechain').disabled = !enabled;
+        document.getElementById('dbgCompressor').disabled = !enabled;
+        document.getElementById('dbgCrossfeed').disabled = !enabled;
+        document.getElementById('dbgFbFilters').disabled = !enabled;
       }
 
       function ProcessIncomingSysEx(dataBytes)
@@ -405,12 +416,18 @@
             document.getElementById('metronomeValue').textContent = vol;
           }
 
-          // Warble level (1-5)
+          // Warble level (0-5)
           if (dataBytes.length >= 4)
           {
             var warble = dataBytes[3];
             document.getElementById('warbleSlider').value = warble;
             updateWarbleLabel(warble);
+          }
+
+          // Debug flags
+          if (dataBytes.length >= 5)
+          {
+            updateDebugToggles(dataBytes[4]);
           }
         }
 
@@ -459,7 +476,8 @@
         }
       }
 
-      var warbleLabels = ['Clean', 'Subtle', 'Moderate', 'Woozy', 'Seasick'];
+      var warbleLabels = ['None', 'Clean', 'Subtle', 'Moderate', 'Woozy', 'Seasick'];
+      var debugFlags = 0;  // Current debug flags bitfield
 
       function onMetronomeChange()
       {
@@ -478,7 +496,26 @@
       function updateWarbleLabel(val)
       {
         document.getElementById('warbleValue').textContent =
-          val + '/5 — ' + warbleLabels[val - 1];
+          val + '/5 — ' + warbleLabels[val];
+      }
+
+      function onDebugToggle()
+      {
+        debugFlags = 0;
+        if (document.getElementById('dbgSidechain').checked)  debugFlags |= DBG_BYPASS_SIDECHAIN;
+        if (document.getElementById('dbgCompressor').checked) debugFlags |= DBG_BYPASS_COMPRESSOR;
+        if (document.getElementById('dbgCrossfeed').checked)  debugFlags |= DBG_BYPASS_CROSSFEED;
+        if (document.getElementById('dbgFbFilters').checked)  debugFlags |= DBG_BYPASS_FB_FILTERS;
+        SendSysEx([SYSEX_SET_DEBUG_FLAGS, debugFlags]);
+      }
+
+      function updateDebugToggles(flags)
+      {
+        debugFlags = flags;
+        document.getElementById('dbgSidechain').checked  = !!(flags & DBG_BYPASS_SIDECHAIN);
+        document.getElementById('dbgCompressor').checked = !!(flags & DBG_BYPASS_COMPRESSOR);
+        document.getElementById('dbgCrossfeed').checked  = !!(flags & DBG_BYPASS_CROSSFEED);
+        document.getElementById('dbgFbFilters').checked  = !!(flags & DBG_BYPASS_FB_FILTERS);
       }
 
       function updateVersionDisplay()
@@ -551,12 +588,54 @@
             <span class="slider-label">Warble</span>
             <span id="warbleValue" class="slider-value">4/5 — Woozy</span>
           </div>
-          <input type="range" id="warbleSlider" min="1" max="5" value="4"
+          <input type="range" id="warbleSlider" min="0" max="5" value="4"
                  disabled oninput="onWarbleChange()">
           <div class="slider-labels">
-            <span>Clean</span>
+            <span>None</span>
             <span>Seasick</span>
           </div>
+        </div>
+      </div>
+
+      <div class="card" style="border-color: #ff6b6b;">
+        <h2 style="color: #ff6b6b;">Diagnostics</h2>
+        <p>Bypass individual signal-path stages for testing.
+           These are runtime-only &mdash; not saved to flash.</p>
+
+        <div class="toggle-row">
+          <span class="toggle-label">Bypass sidechain ducking</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="dbgSidechain" disabled
+                   onchange="onDebugToggle()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+
+        <div class="toggle-row">
+          <span class="toggle-label">Bypass output compressor</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="dbgCompressor" disabled
+                   onchange="onDebugToggle()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+
+        <div class="toggle-row">
+          <span class="toggle-label">Bypass stereo cross-feed</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="dbgCrossfeed" disabled
+                   onchange="onDebugToggle()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+
+        <div class="toggle-row">
+          <span class="toggle-label">Bypass feedback filters</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="dbgFbFilters" disabled
+                   onchange="onDebugToggle()">
+            <span class="toggle-slider"></span>
+          </label>
         </div>
       </div>
 
