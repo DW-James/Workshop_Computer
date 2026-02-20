@@ -14,8 +14,8 @@ It's inspired by the Dub-Delay mixing technique, by the lovely feedback-rich Zen
 **Stereo Tape-style delay**
  The big main knob is the feedback for the delay. Straight up 50% is unity where nothing is lost or gained, to the left the repeats will fade, to the right they will accumulate and bloom. Each channel has its own slow pitch wobble at a different rate, creating stereo drift like two slightly wonky tape machines.
 
-**12 bit crunchy Sample buffer**
-When you send audio into the delay by pushing the toggle switch down, it is also saved as a short, crunchy 12 bit sample in the computer (2 sec mono, 1 sec stereo). Sending a signal into the Pulse 2 input then triggers repeatable playback of this sample into the delay loop, with chance and decoration randomisations dictated by the X knob position. Toggling the switch down at any point adds fresh dry signal to the delay and updates the saved sample.
+**12 bit crunchy Sample buffer with LPG**
+When you send audio into the delay by pushing the toggle switch down, it is also saved as a short, crunchy 12 bit sample in the computer (2 sec mono, 1 sec stereo). The gate has a Low Pass Gate character inspired by the Buchla 292 — audio doesn't just open and close, it brightens as it opens and darkens as it fades, giving captures a natural plonky attack and a warm, rounded tail even from harsh source material. Sending a signal into the Pulse 2 input then triggers repeatable playback of this sample into the delay loop, with chance and decoration randomisations dictated by the X knob position. Toggling the switch down at any point adds fresh dry signal to the delay and updates the saved sample.
 
 **Ring Mod After-Effect**
 The Y knob controls both the After Effect's Dry/Wet and Oscillator Frequency. It's a ring-mod style effect which adds tremolo, warble, or metallic overtones. It comes after the delay and is non-destructive to the delay loop. It is self contained, but can be additionally frequency modulated by external signals fed into CV1. CV2 input can be used to modulate the Y knob value. With a cable in CV2, the Y knob becomes the attenuator for the CV2 modulation.
@@ -47,7 +47,7 @@ Syncs to external clock signal into Pulse 1 input or manual tap tempo
 
 | Position | Behaviour |
 |----------|-----------|
-| **Down** (momentary) | **Capture + feed.** Hold down to feed audio into the delay. Release to lock the captured sample. |
+| **Down** (momentary) | **Capture + feed.** Hold down to feed audio into the delay via a Low Pass Gate — audio opens bright and closes dark, like a vactrol. Release to lock the captured sample (the LPG tail is included). |
 | **Middle** | **Sample locked.** Pulse In 2 replays the captured sample - X knob position dictates chance and effects of playback. |
 | **Up** | **Sample Mute switch.** Pulse In 2 is ignored. The delay tail rings out undisturbed. |
 
@@ -132,12 +132,14 @@ If the clock stops for more than 3 seconds, the last known tempo is maintained.
 
 ## Sample Buffer
 
-The sample buffer is 12 bit 24khz, in the style of classic hardware samplers.
+The sample buffer is 12 bit 24kHz, in the style of classic hardware samplers.
 It starts to capture audio the moment the switch is held **Down** and replays it when triggered by Pulse In 2 (switch in **Middle** position).
 
 - **Mono mode:** Up to 2 seconds at 24kHz (48,000 frames, 96KB)
 - **Stereo mode:** Up to 1 second at 24kHz (24,000 frames, 96KB interleaved)
 - **Chance and Decoration effects** (controlled by X knob): Chance of playback, ratchet (rapid repeats), octave-up, reverse playback, two-octave sparkle.
+
+**Low Pass Gate:** The switch gate behaves like a vactrol-based Low Pass Gate in the tradition of the Buchla 292. A single envelope controls both amplitude and filter cutoff together — when you press the switch down, audio opens quickly with a bright attack (~1ms). When you release, it decays with a warm, darkening tail (~15ms) as the filter closes alongside the volume. This means even a burst of white noise gets shaped into something with a percussive, organic character. The LPG-shaped signal is baked directly into the saved sample, so your captures always have that plonky onset and smooth release built in.
 
 Generally speaking, the X knob minimum anticlockwise setting has lowest chance of firing and no decoration effects. As you turn it clockwise you progressively get higher chance and greater potential for decorations.
 Switch Up position is a playable mute - the sampler will ignore trigger inputs.
