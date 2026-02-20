@@ -2333,8 +2333,10 @@ public:
         // saved sample has the full vactrol character baked in.
         if (switchPos != Switch::Down && gateEnvelope > 0)
         {
-            gateEnvelope -= (gateEnvelope * 2621 + 32768) >> 16;
-            if (gateEnvelope < 2) gateEnvelope = 0;  // snap to zero at -66dB
+            int32_t decay = (gateEnvelope * 2621 + 32768) >> 16;
+            if (decay < 1) decay = 1;  // guarantee progress — prevents stall at low values
+            gateEnvelope -= decay;
+            if (gateEnvelope < 1) gateEnvelope = 0;
 
             if (gateEnvelope > 0)
             {
