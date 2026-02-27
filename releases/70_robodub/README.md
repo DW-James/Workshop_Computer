@@ -28,7 +28,8 @@ Syncs to external clock signal into Pulse 1 input or manual tap tempo
 
 **Two Audio routing modes**:
 **Insert mode** **default** (wet/effect-only) for use as mixer send effect and for simultaneous connection to gear with audio IN and OUT where feedback loops would be problematic, eg: Synthstrom Deluge, Yamaha Reface CP, Roland S-1
-**End-of-chain mode** (dry+wet) Computer will output a full stereo mix.
+
+**End-of-chain mode** (dry+wet) Computer will output a full stereo mix. (dry signal gets converted to 12 bit digital and back again, so will lose some fidelity)
 
 ---
 
@@ -40,7 +41,7 @@ Syncs to external clock signal into Pulse 1 input or manual tap tempo
 | Knob | Function |
 |------|----------|
 | **Main Knob** | **Feedback amount.** Below halfway: repeats fade. Halfway: sustain (unity). Above: bloom and growth up to 106%. Cross-feed adds ~3% stereo spread per repeat. |
-| **X Knob** | **Chaos** — Progressively increases playback density and decoration probability. Decorations include ratchets, octave-up, reverse, two-octave sparkle. Each trigger rolls the dice. Effects stack. |
+| **X Knob** | **Chaos** — Applied to each trigger sent to Pulse 2 In - Progressively increases playback density and decoration probability. Decorations include ratchets, octave-up, reverse, two-octave sparkle. Each trigger rolls the dice. Effects stack. |
 | **Y Knob** | **Ring mod After-Effect** — Controls dry/wet mix and frequency sweep from ~1Hz tremolo to ~2kHz metallic. Some dry delay signal is always present underneath. |
 
 ### Switch
@@ -172,7 +173,7 @@ Robodub can be configured via a web browser using WebMIDI over USB.
 ### Setup
 1. Connect the Workshop Computer to your computer via USB
 2. Open `robodub_config.html` in Chrome
-3. The page will automatically detect the "Robodub" MIDI device
+3. The page should automatically detect the "Robodub" MIDI device
 4. The connection indicator shows green when connected
 
 ### Settings
@@ -249,6 +250,6 @@ ninja
 Flash the resulting `robodub.uf2` to a Workshop System Computer card.
 
 
-Big thanks to Tom Whitwell and Chris Jonhson
+Big thanks to Tom Whitwell and Chris Johnson
 
 Author: James Robinson (Jimantronic) + Claude Code AI. Built on ComputerCard v0.2.8.*
